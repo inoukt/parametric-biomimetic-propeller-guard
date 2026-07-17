@@ -1,4 +1,5 @@
 import bpy
+import bmesh
 import math
 import sys
 
@@ -6,13 +7,15 @@ OBJECT_NAME = "halfApexPropGuardModify.001"
 CENTER = (2.204754, -2.317232)
 FIXED_RADIUS = 10.0
 MOUNT_KEEP_RADIUS = 14.0
+MOUNT_Z_MIN = -3.0034074783325195
+MOUNT_Z_MAX = 0.2965925931930542
 PROP_PRESETS = (2.0, 2.5, 3.0, 3.5, 4.0, 5.0)
 GROUP_NAME = "PG_BiomimeticGuardV2"
 MODIFIER_NAME = "PG Biomimetic Guard V2"
 PARAMETERS = {
     "Propeller Diameter (in)": (2.0, 5.0, 2.0),
-    "Guard Height (mm)": (3.0, 101.6, 12.0),
-    "Bumper Thickness (mm)": (1.2, 8.0, 3.2),
+    "Guard Height (mm)": (3.3, 101.6, 12.0),
+    "Bumper Thickness (mm)": (1.2, 8.0, 2.2),
     "Strength / Weight": (0.0, 1.0, 0.5),
     "Nozzle Diameter (mm)": (0.4, 0.8, 0.4),
     "Safety Clearance Override (mm)": (0.0, 1_000_000.0, 0.0),
@@ -36,7 +39,7 @@ def mount_signature(obj):
 
 def sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0):
     assert 2.0 <= prop_inches <= 5.0
-    assert 3.0 <= height <= 101.6
+    assert 3.3 <= height <= 101.6
     assert 0.0 <= strength <= 1.0
     assert 0.4 <= nozzle <= 0.8
     assert clearance_override >= 0.0
@@ -60,7 +63,7 @@ def sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0
         "outer_diameter": 2.0 * (inner_radius + bumper),
         "primary_width": primary_width,
         "fork_width": fork_width,
-        "root_radius": 10.5,
+        "root_radius": 12.0,
         "fork_radius": max(16.0, inner_radius * 0.68),
         "fork_angle": math.radians(18.0),
     }
@@ -179,22 +182,52 @@ def parameter_nodes(group, group_in):
     }
 
 
+def flat_bottom_profile(group, name, width_socket, height_socket, resolution):
+    nodes, links = group.nodes, group.links
+    circle = node(nodes, "GeometryNodeCurvePrimitiveCircle", f"{name} Circle")
+    circle.mode = "RADIUS"
+    circle.inputs["Resolution"].default_value = resolution
+    circle.inputs["Radius"].default_value = 1.0
+    position = node(nodes, "GeometryNodeInputPosition", f"{name} Position")
+    separate = node(nodes, "ShaderNodeSeparateXYZ", f"{name} Separate Position")
+    links.new(position.outputs["Position"], separate.inputs["Vector"])
+    clamped_y = math_node(group, f"{name} Flat Bottom", "MAXIMUM", separate.outputs["Y"], -0.7)
+    remapped_y = math_node(group, f"{name} Shift Bottom", "ADD", clamped_y, 0.7)
+    remapped_y = math_node(group, f"{name} Normalize Height", "DIVIDE", remapped_y, 1.7)
+    remapped_y = math_node(group, f"{name} Scale Height", "MULTIPLY", remapped_y, 2.0)
+    remapped_y = math_node(group, f"{name} Center Height", "SUBTRACT", remapped_y, 1.0)
+    offset_y = math_node(group, f"{name} Bottom Offset", "SUBTRACT", remapped_y, separate.outputs["Y"])
+    set_position = node(nodes, "GeometryNodeSetPosition", f"{name} D Profile")
+    links.new(circle.outputs["Curve"], set_position.inputs["Geometry"])
+    links.new(combine_xyz(group, f"{name} Offset", 0.0, offset_y, 0.0), set_position.inputs["Offset"])
+    shape = node(nodes, "GeometryNodeTransform", f"{name} Shape")
+    half_width = math_node(group, f"{name} Half Width", "DIVIDE", width_socket, 2.0)
+    half_height = math_node(group, f"{name} Half Height", "DIVIDE", height_socket, 2.0)
+    links.new(set_position.outputs["Geometry"], shape.inputs["Geometry"])
+    links.new(combine_xyz(group, f"{name} Scale", half_width, half_height, 1.0), shape.inputs["Scale"])
+    return shape.outputs["Geometry"]
+
+
 def bumper_nodes(group, values):
     nodes, links = group.nodes, group.links
     circle = node(nodes, "GeometryNodeCurvePrimitiveCircle", "Bumper Centerline")
     circle.mode = "RADIUS"
     circle.inputs["Resolution"].default_value = 128
-    profile = node(nodes, "GeometryNodeCurvePrimitiveQuadrilateral", "Bumper Profile")
-    profile.mode = "RECTANGLE"
+    profile = flat_bottom_profile(
+        group, "Rounded Bumper Profile", values["bumper"], values["height"], 24
+    )
     curve_to_mesh = node(nodes, "GeometryNodeCurveToMesh", "Solid Bumper")
     transform = node(nodes, "GeometryNodeTransform", "Place Bumper")
     links.new(values["bumper_center_radius"], circle.inputs["Radius"])
-    links.new(values["bumper"], profile.inputs["Width"])
-    links.new(values["height"], profile.inputs["Height"])
     links.new(circle.outputs["Curve"], curve_to_mesh.inputs["Curve"])
-    links.new(profile.outputs["Curve"], curve_to_mesh.inputs["Profile Curve"])
+    links.new(profile, curve_to_mesh.inputs["Profile Curve"])
     links.new(curve_to_mesh.outputs["Mesh"], transform.inputs["Geometry"])
-    transform.inputs["Translation"].default_value = (*CENTER, 0.0)
+    z_center = math_node(group, "Bumper Half Height", "DIVIDE", values["height"], 2.0)
+    z_center = math_node(group, "Bumper Print Bed Alignment", "ADD", z_center, MOUNT_Z_MIN)
+    links.new(
+        combine_xyz(group, "Bumper Position", CENTER[0], CENTER[1], z_center),
+        transform.inputs["Translation"],
+    )
     return transform.outputs["Geometry"]
 
 
@@ -220,35 +253,34 @@ def bezier_segment(group, name, start, start_handle, end_handle, end):
     return result.outputs["Curve"]
 
 
-def sampled_branch(group, name, curve_socket, width_socket, height_socket, start_scale, end_scale):
+def continuous_branch(group, name, curve_socket, width_socket, height_socket):
     nodes, links = group.nodes, group.links
-    points = node(nodes, "GeometryNodeCurveToPoints", f"{name} Samples")
-    points.mode = "COUNT"
-    points.inputs["Count"].default_value = 14
-    cylinder = node(nodes, "GeometryNodeMeshCylinder", f"{name} Section")
-    cylinder.inputs["Vertices"].default_value = 24
-    cylinder.inputs["Side Segments"].default_value = 1
-    cylinder.inputs["Fill Segments"].default_value = 1
-    radius = math_node(group, f"{name} Half Width", "DIVIDE", width_socket, 2.0)
-    links.new(radius, cylinder.inputs["Radius"])
-    links.new(height_socket, cylinder.inputs["Depth"])
-    factor = node(nodes, "GeometryNodeSplineParameter", f"{name} Factor")
-    taper = node(nodes, "ShaderNodeMapRange", f"{name} Taper")
-    taper.clamp = True
-    taper.inputs["From Min"].default_value = 0.0
-    taper.inputs["From Max"].default_value = 1.0
-    taper.inputs["To Min"].default_value = start_scale
-    taper.inputs["To Max"].default_value = end_scale
-    links.new(factor.outputs["Factor"], taper.inputs["Value"])
-    scale = combine_xyz(group, f"{name} XY Taper", taper.outputs["Result"], taper.outputs["Result"], 1.0)
-    instances = node(nodes, "GeometryNodeInstanceOnPoints", f"{name} Cylinders")
-    realize = node(nodes, "GeometryNodeRealizeInstances", name)
-    links.new(curve_socket, points.inputs["Curve"])
-    links.new(points.outputs["Points"], instances.inputs["Points"])
-    links.new(cylinder.outputs["Mesh"], instances.inputs["Instance"])
-    links.new(scale, instances.inputs["Scale"])
-    links.new(instances.outputs["Instances"], realize.inputs["Geometry"])
-    return realize.outputs["Geometry"]
+    profile = flat_bottom_profile(group, f"{name} Rounded Profile", width_socket, height_socket, 16)
+    mesh = node(nodes, "GeometryNodeCurveToMesh", name)
+    mesh.inputs["Fill Caps"].default_value = True
+    links.new(curve_socket, mesh.inputs["Curve"])
+    links.new(profile, mesh.inputs["Profile Curve"])
+    return mesh.outputs["Mesh"]
+
+
+def junction_pad(
+    group, name, x, y, width_socket, height_socket, radius_factor=1.2, radius_socket=None
+):
+    nodes, links = group.nodes, group.links
+    pad = node(nodes, "GeometryNodeMeshCylinder", name)
+    pad.inputs["Vertices"].default_value = 32
+    pad.inputs["Side Segments"].default_value = 1
+    pad.inputs["Fill Segments"].default_value = 1
+    if radius_socket is None:
+        radius_socket = math_node(
+            group, f"{name} Radius", "MULTIPLY", width_socket, radius_factor
+        )
+    links.new(radius_socket, pad.inputs["Radius"])
+    links.new(height_socket, pad.inputs["Depth"])
+    place = node(nodes, "GeometryNodeTransform", f"Place {name}")
+    links.new(pad.outputs["Mesh"], place.inputs["Geometry"])
+    links.new(combine_xyz(group, f"{name} Position", x, y, 0.0), place.inputs["Translation"])
+    return place.outputs["Geometry"]
 
 
 def arm_nodes(group, values):
@@ -284,14 +316,12 @@ def arm_nodes(group, values):
     primary_curve = bezier_segment(
         group,
         "Primary Arm Curve",
-        (10.5, 0.0, 0.0),
+        (12.0, 0.0, 0.0),
         (13.0, 0.0, 0.0),
         combine_xyz(group, "Primary End Handle", primary_end_handle_x, 0.0, 0.0),
         combine_xyz(group, "Primary Fork Point", fork_radius, 0.0, 0.0),
     )
-    primary = sampled_branch(
-        group, "Primary Arm", primary_curve, primary_width, values["height"], 1.25, 1.0
-    )
+    primary = continuous_branch(group, "Primary Arm", primary_curve, primary_width, values["height"])
 
     cos_angle = math.cos(math.radians(18.0))
     sin_angle = math.sin(math.radians(18.0))
@@ -334,14 +364,26 @@ def arm_nodes(group, values):
         combine_xyz(group, "Lower Fork End Handle", handle2_x, negative_handle2_y, 0.0),
         combine_xyz(group, "Lower Fork End", end_x, negative_end_y, 0.0),
     )
-    upper = sampled_branch(
-        group, "Upper Fork", upper_curve, fork_width, values["height"], 1.0, 1.2
-    )
-    lower = sampled_branch(
-        group, "Lower Fork", lower_curve, fork_width, values["height"], 1.0, 1.2
-    )
+    upper = continuous_branch(group, "Upper Fork", upper_curve, fork_width, values["height"])
+    lower = continuous_branch(group, "Lower Fork", lower_curve, fork_width, values["height"])
     local = node(nodes, "GeometryNodeJoinGeometry", "Local Y Arm")
-    for geometry in (primary, upper, lower):
+    root_pad_radius = math_node(group, "Scaled Root Bridge Radius", "MULTIPLY", primary_width, 0.65)
+    root_pad_radius = math_node(group, "Maximum Root Bridge Radius", "MINIMUM", root_pad_radius, 2.0)
+    root_pad_radius = math_node(group, "Minimum Root Bridge Radius", "MAXIMUM", root_pad_radius, 0.95)
+    root_pad_x = math_node(group, "Root Bridge Center", "ADD", root_pad_radius, 10.2)
+    root_pad = junction_pad(
+        group,
+        "Root Junction Pad",
+        root_pad_x,
+        0.0,
+        primary_width,
+        values["height"],
+        radius_socket=root_pad_radius,
+    )
+    fork_pad = junction_pad(group, "Fork Junction Pad", fork_radius, 0.0, fork_width, values["height"])
+    upper_pad = junction_pad(group, "Upper Bumper Pad", end_x, end_y, fork_width, values["height"])
+    lower_pad = junction_pad(group, "Lower Bumper Pad", end_x, negative_end_y, fork_width, values["height"])
+    for geometry in (primary, upper, lower, root_pad, fork_pad, upper_pad, lower_pad):
         links.new(geometry, local.inputs["Geometry"])
 
     points = node(nodes, "GeometryNodeMeshLine", "Three Arm Points")
@@ -360,7 +402,12 @@ def arm_nodes(group, values):
     links.new(rotation, instances.inputs["Rotation"])
     links.new(instances.outputs["Instances"], realize.inputs["Geometry"])
     links.new(realize.outputs["Geometry"], place.inputs["Geometry"])
-    place.inputs["Translation"].default_value = (*CENTER, 0.0)
+    z_center = math_node(group, "Arm Half Height", "DIVIDE", values["height"], 2.0)
+    z_center = math_node(group, "Arm Print Bed Alignment", "ADD", z_center, MOUNT_Z_MIN)
+    links.new(
+        combine_xyz(group, "Arm Network Position", CENTER[0], CENTER[1], z_center),
+        place.inputs["Translation"],
+    )
     return place.outputs["Geometry"]
 
 
@@ -427,6 +474,9 @@ def build_node_group():
     bumper = bumper_nodes(group, values)
     arms = arm_nodes(group, values)
     body = union_node(group, "Union Bumper and Arms", bumper, arms)
+    # The face selection is an inspectable audit mask. Feeding its open boundary
+    # to a boolean would destroy manifoldness, so the closed mount is clipped
+    # directly from the unchanged source mesh using the same 14 mm boundary.
     closed_mount = closed_mount_nodes(group, group_in.outputs["Geometry"])
     final = union_node(group, "Union V2 Body", body, closed_mount)
     links.new(final, group_out.inputs["Geometry"])
@@ -440,6 +490,13 @@ def install_modifier(obj):
     else:
         modifier = obj.modifiers.new(MODIFIER_NAME, "NODES")
     modifier.node_group = build_node_group()
+    for name, (_minimum, _maximum, default) in PARAMETERS.items():
+        socket = next(
+            item
+            for item in modifier.node_group.interface.items_tree
+            if item.item_type == "SOCKET" and item.in_out == "INPUT" and item.name == name
+        )
+        getattr(modifier.properties.inputs, socket.identifier).value = default
     v1 = obj.modifiers.get("PG Parametric Guard")
     if v1:
         v1.show_viewport = False
@@ -483,6 +540,42 @@ def dimensions(vertices):
     )
 
 
+def mesh_report(obj):
+    evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    mesh = evaluated.to_mesh()
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        bm.verts.ensure_lookup_table()
+        seen = set()
+        components = 0
+        for vertex in bm.verts:
+            if vertex.index in seen:
+                continue
+            components += 1
+            seen.add(vertex.index)
+            stack = [vertex]
+            while stack:
+                current = stack.pop()
+                for edge in current.link_edges:
+                    neighbour = edge.other_vert(current)
+                    if neighbour.index not in seen:
+                        seen.add(neighbour.index)
+                        stack.append(neighbour)
+        volume = bm.calc_volume(signed=False)
+        return {
+            "vertices": len(bm.verts),
+            "faces": len(bm.faces),
+            "components": components,
+            "nonmanifold_edges": sum(not edge.is_manifold for edge in bm.edges),
+            "volume_mm3": volume,
+            "dimensions": dimensions(tuple(tuple(vertex.co) for vertex in mesh.vertices)),
+        }
+    finally:
+        bm.free()
+        evaluated.to_mesh_clear()
+
+
 def self_check():
     obj = get_guard()
     assert tuple(obj.scale) == (1.0, 1.0, 1.0)
@@ -507,10 +600,10 @@ def self_check():
         fixed.data[index].value == float(index in fixed_indices)
         for index in range(len(obj.data.vertices))
     )
-    values = sizing(2.0, 12.0, 3.2, 0.5, 0.4)
+    values = sizing(2.0, 12.0, 2.2, 0.5, 0.4)
     assert math.isclose(values["prop_mm"], 50.8)
     assert math.isclose(values["clearance"], 2.032)
-    assert math.isclose(values["outer_diameter"], 61.264)
+    assert math.isclose(values["outer_diameter"], 59.264)
     assert math.isclose(values["min_feature"], 1.2)
     modifier = obj.modifiers.get(MODIFIER_NAME)
     assert modifier and modifier.type == "NODES", "Missing V2 modifier"
@@ -546,7 +639,7 @@ def self_check():
     for name, value in (
         ("Propeller Diameter (in)", 2.0),
         ("Guard Height (mm)", 12.0),
-        ("Bumper Thickness (mm)", 3.2),
+        ("Bumper Thickness (mm)", 2.2),
         ("Strength / Weight", 0.5),
         ("Nozzle Diameter (mm)", 0.4),
         ("Safety Clearance Override (mm)", 0.0),
@@ -555,10 +648,19 @@ def self_check():
     bpy.context.view_layer.update()
     evaluated = evaluated_vertices(obj)
     measured = dimensions(evaluated)
-    assert abs(max(measured[:2]) - 61.264) <= 0.05, measured
+    assert abs(max(measured[:2]) - 59.264) <= 0.05, measured
     assert abs(measured[2] - 12.0) <= 0.05, measured
     evaluated_coordinates = set(evaluated)
     assert {coordinate for _index, coordinate in mount_signature(obj)} <= evaluated_coordinates
+    report = mesh_report(obj)
+    assert report["components"] == 1, report
+    assert report["nonmanifold_edges"] == 0, report
+    mass_low = report["volume_mm3"] * 0.00120
+    mass_high = report["volume_mm3"] * 0.00125
+    assert 7.0 <= mass_low and mass_high <= 8.0, (mass_low, mass_high)
+    obj["PG_V2_Estimated_Mass_g_1.20"] = mass_low
+    obj["PG_V2_Estimated_Mass_g_1.25"] = mass_high
+    obj["PG_V2_Defaults"] = "2 in, 12 mm height, 2.2 mm bumper, balanced, 0.4 mm nozzle"
 
 
 if __name__ == "__main__":

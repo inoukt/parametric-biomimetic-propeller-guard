@@ -11,13 +11,16 @@ The balanced design target is 25–30% less material than an equivalently sized 
 V2 uses topology-guided organic load paths rather than decorative random holes:
 
 - One continuous, rounded outer bumper absorbs direct impacts.
-- Three tapered primary arms grow from the fixed motor hub.
+- Three constant-profile primary arms grow from the fixed motor hub and divide into lighter fork veins.
 - Each primary arm forks near the bumper like tree roots or leaf veins, spreading loads across multiple ring attachment points.
+- The material hierarchy usually tapers discretely from wider primary veins into narrower fork veins; the printable-minimum clamp may make them equal at large nozzle settings. Individual D-profile branches keep constant height and width so the height parameter remains exact and print-bed contact stays flat.
 - Large organic cells remove material from low-stress areas.
 - Hub, fork, and bumper junctions use generous continuous fillets without sharp internal corners.
 - The result is one connected, manifold body that prints flat without supports.
 
 The imported V1 mesh remains available as reference geometry but is not stretched to create V2. Diameter and height changes regenerate the procedural arms, cells, and bumper.
+
+`PG_V2_MountKeep` is an inspectable audit mask showing every retained source face. The printable mount is produced by an exact 14 mm radial intersection of the unchanged closed source mesh; using the separated face mask itself would introduce an open boundary. Validation checks that every protected coordinate within 10 mm survives the final union exactly.
 
 ## Fixed Mount Contract
 
@@ -38,8 +41,8 @@ Swappable motor mounts remain deferred until a second motor specification exists
 Expose these controls through one clearly named Geometry Nodes modifier:
 
 - **Propeller Diameter (in):** continuous 2–5-inch input with quick presets for 2, 2.5, 3, 3.5, 4, and 5 inches. Internally the presets are 50.8, 63.5, 76.2, 88.9, 101.6, and 127 mm. Default: 2 inches.
-- **Guard Height (mm):** 3–101.6 mm. Default: 12 mm.
-- **Bumper Thickness (mm):** changes the radial thickness of the continuous outer impact ring. Input range: 1.2–8 mm; evaluated thickness is clamped to at least `3 × Nozzle Diameter`. Default: 3.2 mm.
+- **Guard Height (mm):** 3.3–101.6 mm. The 3.3 mm lower bound is the unchanged mounting hub's physical height. Default: 12 mm.
+- **Bumper Thickness (mm):** changes the radial thickness of the continuous outer impact ring. Input range: 1.2–8 mm; evaluated thickness is clamped to at least `3 × Nozzle Diameter`. Default: 2.2 mm with a 0.4 mm nozzle; selecting a 0.8 mm nozzle automatically clamps it to 2.4 mm.
 - **Strength / Weight:** normalized 0–1, where 0 is lightest and 1 is strongest. It changes rib width, branch thickness, fork reinforcement, fillet size, and organic-cell openness together. Default: 0.5.
 - **Nozzle Diameter (mm):** 0.4–0.8 mm. It sets manufacturing minimums but does not otherwise redesign the mount. Default: 0.4 mm.
 - **Safety Clearance Override (mm):** 0 uses the automatic clearance rule; a positive value replaces it. Default: 0.

@@ -4,7 +4,7 @@
 
 **Goal:** Replace V1's stretched guard body with a procedural, biomimetic 2–5-inch TPU guard while preserving the imported motor mount and mounting holes exactly.
 
-**Architecture:** A new idempotent Blender Python script creates inspectable mount-selection attributes and one Geometry Nodes modifier on `halfApexPropGuardModify.001`. The node group retains the original hub plus short arm roots, generates a rounded rectangular bumper and three forked Bezier arm networks from physical inputs, and joins them with exact mesh booleans outside the fixed 10 mm mount radius. V1 remains recoverable by disabling the V2 modifier.
+**Architecture:** A new idempotent Blender Python script creates inspectable mount-selection audit attributes and one Geometry Nodes modifier on `halfApexPropGuardModify.001`. The node group clips a closed 14 mm mount directly from the unchanged source mesh, generates a rounded elliptical bumper and three forked Bezier arm networks from physical inputs, and joins them with exact mesh booleans outside the fixed 10 mm mount radius. The separated audit mask is deliberately not used as boolean input because its cut boundary is open. V1 remains recoverable by disabling the V2 modifier.
 
 **Tech Stack:** Blender 5.2 Python API, Geometry Nodes, Python standard library, `mathutils`; no add-on, handler, or external dependency.
 
@@ -16,8 +16,8 @@
 - Propeller presets: 2, 2.5, 3, 3.5, 4, and 5 inches.
 - Automatic radial clearance: `max(2 mm, 0.04 × propeller diameter)`.
 - Derived outer diameter: `propeller diameter + 2 × (clearance + bumper thickness)`.
-- Height range: 3–101.6 mm; default 12 mm.
-- Bumper thickness: `max(3 × nozzle diameter, 1.2 mm)` through 8 mm; default 3.2 mm.
+- Height range: 3.3–101.6 mm; default 12 mm. Procedural geometry aligns to the unchanged hub's print-bed face.
+- Bumper thickness: `max(3 × nozzle diameter, 1.2 mm)` through 8 mm; default 2.2 mm (automatically 2.4 mm at a 0.8 mm nozzle).
 - Strength / Weight range: 0–1; default 0.5.
 - Nozzle diameter range: 0.4–0.8 mm; default 0.4 mm.
 - Minimum printable feature: `3 × nozzle diameter`.
@@ -82,10 +82,10 @@ def self_check():
     obj = get_guard()
     assert obj.data.attributes.get("PG_FixedMount")
     assert obj.data.attributes.get("PG_V2_MountKeep")
-    values = sizing(2.0, 12.0, 3.2, 0.5, 0.4)
+    values = sizing(2.0, 12.0, 2.2, 0.5, 0.4)
     assert math.isclose(values["prop_mm"], 50.8)
     assert math.isclose(values["clearance"], 2.032)
-    assert math.isclose(values["outer_diameter"], 61.264)
+    assert math.isclose(values["outer_diameter"], 59.264)
     assert math.isclose(values["min_feature"], 1.2)
 
 
@@ -110,7 +110,7 @@ Add:
 ```python
 def sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0):
     assert 2.0 <= prop_inches <= 5.0
-    assert 3.0 <= height <= 101.6
+    assert 3.3 <= height <= 101.6
     assert 0.0 <= strength <= 1.0
     assert 0.4 <= nozzle <= 0.8
     prop_mm = prop_inches * 25.4
@@ -227,11 +227,11 @@ Add these reusable helpers:
 ```python
 PARAMETERS = {
     "Propeller Diameter (in)": (2.0, 5.0, 2.0),
-    "Guard Height (mm)": (3.0, 101.6, 12.0),
-    "Bumper Thickness (mm)": (1.2, 8.0, 3.2),
+    "Guard Height (mm)": (3.3, 101.6, 12.0),
+    "Bumper Thickness (mm)": (1.2, 8.0, 2.2),
     "Strength / Weight": (0.0, 1.0, 0.5),
     "Nozzle Diameter (mm)": (0.4, 0.8, 0.4),
-    "Safety Clearance Override (mm)": (0.0, 20.0, 0.0),
+    "Safety Clearance Override (mm)": (0.0, 1_000_000.0, 0.0),
 }
 
 
@@ -321,7 +321,7 @@ git commit -m "feat: add biomimetic guard modifier interface"
 
 - [ ] **Step 1: Add a failing evaluated-diameter assertion**
 
-Add parameter assignment and evaluated bounds helpers, then assert the 2-inch default outer diameter is 61.264 mm within 0.05 mm:
+Add parameter assignment and evaluated bounds helpers, then assert the 2-inch default outer diameter is 59.264 mm within 0.05 mm:
 
 ```python
 def parameter_socket(modifier, name):
@@ -355,9 +355,9 @@ def dimensions(vertices):
 
 set_parameter(modifier, "Propeller Diameter (in)", 2.0)
 set_parameter(modifier, "Guard Height (mm)", 12.0)
-set_parameter(modifier, "Bumper Thickness (mm)", 3.2)
+set_parameter(modifier, "Bumper Thickness (mm)", 2.2)
 bpy.context.view_layer.update()
-assert abs(max(dimensions(evaluated_vertices(obj))[:2]) - 61.264) <= 0.05
+assert abs(max(dimensions(evaluated_vertices(obj))[:2]) - 59.264) <= 0.05
 ```
 
 - [ ] **Step 2: Run and verify the diameter assertion fails**
@@ -390,17 +390,17 @@ def bumper_nodes(group, values):
     circle = node(nodes, "GeometryNodeCurvePrimitiveCircle", "Bumper Centerline")
     circle.mode = "RADIUS"
     circle.inputs["Resolution"].default_value = 128
-    profile = node(nodes, "GeometryNodeCurvePrimitiveQuadrilateral", "Rounded Rectangle Profile")
-    profile.mode = "RECTANGLE"
+    profile = node(nodes, "GeometryNodeCurvePrimitiveCircle", "Rounded Bumper Profile")
+    profile.mode = "RADIUS"
+    profile.inputs["Resolution"].default_value = 12
     curve_to_mesh = node(nodes, "GeometryNodeCurveToMesh", "Solid Bumper")
     transform = node(nodes, "GeometryNodeTransform", "Place Bumper")
     links.new(values["bumper_center_radius"], circle.inputs["Radius"])
-    links.new(values["bumper"], profile.inputs["Width"])
-    links.new(values["height"], profile.inputs["Height"])
+    # Transform the unit circle to an ellipse of bumper/2 by height/2.
     links.new(circle.outputs["Curve"], curve_to_mesh.inputs["Curve"])
-    links.new(profile.outputs["Curve"], curve_to_mesh.inputs["Profile Curve"])
+    links.new(profile_scale.outputs["Geometry"], curve_to_mesh.inputs["Profile Curve"])
     links.new(curve_to_mesh.outputs["Mesh"], transform.inputs["Geometry"])
-    transform.inputs["Translation"].default_value = (*CENTER, 0.0)
+    # Translate XY to CENTER and Z so the profile bottom equals MOUNT_Z_MIN.
     return transform.outputs["Geometry"]
 ```
 
@@ -408,7 +408,7 @@ Join the bumper with the retained mount for this task using `GeometryNodeJoinGeo
 
 - [ ] **Step 5: Run the check and verify derived diameter and height**
 
-Run the Task 1 command. Expected: exit code 0; evaluated diameter 61.264 ±0.05 mm and height 12 ±0.05 mm.
+Run the Task 1 command. Expected: exit code 0; evaluated diameter 59.264 ±0.05 mm and height 12 ±0.05 mm.
 
 - [ ] **Step 6: Commit**
 
@@ -426,7 +426,7 @@ git commit -m "feat: generate derived TPU bumper"
 **Interfaces:**
 - Consumes: `values` sockets from `parameter_nodes()` and bumper geometry from `bumper_nodes()`.
 - Produces: `arm_nodes(group, values) -> bpy.types.NodeSocketGeometry`.
-- Produces three primary arms, six fork branches, and rounded junction pads.
+- Produces three primary arms, six fork branches, and rounded junction pads. The width hierarchy supplies the biomimetic taper without scaling branch height, except when the printable-minimum clamp makes both widths equal.
 
 - [ ] **Step 1: Add a failing structural node assertion**
 
@@ -447,7 +447,7 @@ assert required <= {node.name for node in group.nodes}, "Missing biomimetic arm 
 
 Run the Task 1 command. Expected: nonzero exit with that message.
 
-- [ ] **Step 3: Add curve-segment and tapered-profile helpers**
+- [ ] **Step 3: Add curve-segment and constant-height profile helpers**
 
 Implement these helpers using supported Blender 5.2 nodes:
 
@@ -464,26 +464,14 @@ def bezier_segment(nodes, links, name, start, start_handle, end, end_handle):
     return curve
 
 
-def tapered_curve_mesh(group, curve_socket, width_socket, height_socket, name):
+def branch_curve_mesh(group, curve_socket, width_socket, height_socket, name):
     nodes, links = group.nodes, group.links
-    spline = node(nodes, "GeometryNodeSplineParameter", f"{name} Factor")
-    scale = node(nodes, "ShaderNodeMapRange", f"{name} Taper")
-    scale.clamp = True
-    scale.inputs["From Min"].default_value = 0.0
-    scale.inputs["From Max"].default_value = 1.0
-    scale.inputs["To Min"].default_value = 1.25
-    scale.inputs["To Max"].default_value = 0.85
-    radius = node(nodes, "GeometryNodeSetCurveRadius", f"{name} Radius")
-    profile = node(nodes, "GeometryNodeCurvePrimitiveQuadrilateral", f"{name} Profile")
-    profile.mode = "RECTANGLE"
+    profile = node(nodes, "GeometryNodeCurvePrimitiveCircle", f"{name} Rounded Profile")
+    profile.mode = "RADIUS"
     mesh = node(nodes, "GeometryNodeCurveToMesh", name)
-    links.new(curve_socket, radius.inputs["Curve"])
-    links.new(spline.outputs["Factor"], scale.inputs["Value"])
-    links.new(scale.outputs["Result"], radius.inputs["Radius"])
-    links.new(width_socket, profile.inputs["Width"])
-    links.new(height_socket, profile.inputs["Height"])
-    links.new(radius.outputs["Curve"], mesh.inputs["Curve"])
-    links.new(profile.outputs["Curve"], mesh.inputs["Profile Curve"])
+    # Transform the unit circle to an ellipse of width/2 by height/2.
+    links.new(curve_socket, mesh.inputs["Curve"])
+    links.new(profile_shape.outputs["Geometry"], mesh.inputs["Profile Curve"])
     return mesh.outputs["Mesh"]
 ```
 
@@ -498,7 +486,7 @@ primary_end_handle_fraction = 0.82
 fork_angle = math.radians(18.0)
 ```
 
-Construct `Primary Arm`, `Upper Fork`, and `Lower Fork` with Bezier Segment nodes. Use `ShaderNodeMath` `SINE`/`COSINE` and `ShaderNodeCombineXYZ` so fork endpoints follow `inner_radius`. Use `tapered_curve_mesh()` separately for the primary and forks. Compute widths in nodes:
+Construct `Primary Arm`, `Upper Fork`, and `Lower Fork` with Bezier Segment nodes. Use `ShaderNodeMath` `SINE`/`COSINE` and `ShaderNodeCombineXYZ` so fork endpoints follow `inner_radius`. Use `branch_curve_mesh()` separately for the primary and forks. Compute widths in nodes:
 
 ```python
 minimum_feature = nozzle * 3.0
@@ -520,7 +508,7 @@ Use `GeometryNodeMeshBoolean` nodes with `operation = "UNION"` and `solver = "EX
 
 - [ ] **Step 7: Run the structural check and visually inspect the default**
 
-Run the Task 1 command. Expected: exit code 0. In the viewport, confirm three tapered primary arms, six curved forks, continuous bumper, open organic cells, rounded junctions, and unchanged hub.
+Run the Task 1 command. Expected: exit code 0. In the viewport, confirm three primary arms, six lighter curved forks, continuous bumper, open organic cells, rounded junctions, and unchanged hub.
 
 - [ ] **Step 8: Commit**
 
@@ -608,14 +596,14 @@ Use this matrix:
 
 ```python
 cases = [
-    (prop, 12.0, 3.2, 0.5, 0.4, 0.0)
+    (prop, 12.0, 2.2, 0.5, 0.4, 0.0)
     for prop in PROP_PRESETS
 ] + [
-    (2.0, 3.0, 2.4, 0.0, 0.8, 0.0),
+    (2.0, 3.3, 2.4, 0.0, 0.8, 0.0),
     (2.0, 101.6, 8.0, 1.0, 0.8, 0.0),
-    (5.0, 3.0, 2.4, 0.0, 0.8, 0.0),
+    (5.0, 3.3, 2.4, 0.0, 0.8, 0.0),
     (5.0, 101.6, 8.0, 1.0, 0.8, 0.0),
-    (3.5, 12.0, 3.2, 0.5, 0.4, 3.0),
+    (3.5, 12.0, 2.2, 0.5, 0.4, 3.0),
 ]
 ```
 
