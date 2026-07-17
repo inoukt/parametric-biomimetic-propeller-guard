@@ -179,13 +179,19 @@ def bumper_nodes(group, values):
     circle = node(nodes, "GeometryNodeCurvePrimitiveCircle", "Bumper Centerline")
     circle.mode = "RADIUS"
     circle.inputs["Resolution"].default_value = 128
+    trim = node(nodes, "GeometryNodeTrimCurve", "Open Bumper Arc")
+    trim.mode = "FACTOR"
+    trim.inputs["Start"].default_value = ARC_START / 360.0
+    trim.inputs["End"].default_value = ARC_END / 360.0
     profile = flat_bottom_profile(
         group, "Rounded Bumper Profile", values["bumper"], values["height"], 24
     )
     curve_to_mesh = node(nodes, "GeometryNodeCurveToMesh", "Solid Bumper")
+    curve_to_mesh.inputs["Fill Caps"].default_value = True
     transform = node(nodes, "GeometryNodeTransform", "Place Bumper")
     links.new(values["bumper_center_radius"], circle.inputs["Radius"])
-    links.new(circle.outputs["Curve"], curve_to_mesh.inputs["Curve"])
+    links.new(circle.outputs["Curve"], trim.inputs["Curve"])
+    links.new(trim.outputs["Curve"], curve_to_mesh.inputs["Curve"])
     links.new(profile, curve_to_mesh.inputs["Profile Curve"])
     links.new(curve_to_mesh.outputs["Mesh"], transform.inputs["Geometry"])
     z_center = math_node(group, "Bumper Half Height", "DIVIDE", values["height"], 2.0)
@@ -282,8 +288,8 @@ def arm_nodes(group, values):
     primary_curve = bezier_segment(
         group,
         "Primary Arm Curve",
+        (9.0, 0.0, 0.0),
         (12.0, 0.0, 0.0),
-        (13.0, 0.0, 0.0),
         combine_xyz(group, "Primary End Handle", primary_end_handle_x, 0.0, 0.0),
         combine_xyz(group, "Primary Fork Point", fork_radius, 0.0, 0.0),
     )
@@ -336,11 +342,10 @@ def arm_nodes(group, values):
     root_pad_radius = math_node(group, "Scaled Root Bridge Radius", "MULTIPLY", primary_width, 0.65)
     root_pad_radius = math_node(group, "Maximum Root Bridge Radius", "MINIMUM", root_pad_radius, 2.0)
     root_pad_radius = math_node(group, "Minimum Root Bridge Radius", "MAXIMUM", root_pad_radius, 0.95)
-    root_pad_x = math_node(group, "Root Bridge Center", "ADD", root_pad_radius, 10.2)
     root_pad = junction_pad(
         group,
         "Root Junction Pad",
-        root_pad_x,
+        9.5,
         0.0,
         primary_width,
         values["height"],
@@ -358,7 +363,16 @@ def arm_nodes(group, values):
     points.inputs["Start Location"].default_value = (0.0, 0.0, 0.0)
     points.inputs["Offset"].default_value = (0.0, 0.0, 0.0)
     index = node(nodes, "GeometryNodeInputIndex", "Arm Index")
-    rotation_z = math_node(group, "Arm Rotation", "MULTIPLY", index.outputs["Index"], 2.0 * math.pi / 3.0)
+    rotation_z = math_node(
+        group,
+        "Arm Rotation Step",
+        "MULTIPLY",
+        index.outputs["Index"],
+        math.radians(85.0),
+    )
+    rotation_z = math_node(
+        group, "Arm Rotation", "ADD", rotation_z, math.radians(50.0)
+    )
     rotation = combine_xyz(group, "Arm Rotation Vector", 0.0, 0.0, rotation_z)
     instances = node(nodes, "GeometryNodeInstanceOnPoints", "Threefold Arm Instances")
     realize = node(nodes, "GeometryNodeRealizeInstances", "Realize Arm Network")
@@ -488,9 +502,9 @@ def build_node_group():
     values = parameter_nodes(group, group_in)
     bumper = bumper_nodes(group, values)
     arms = arm_nodes(group, values)
-    body = union_node(group, "Union Bumper and Arms", bumper, arms)
     mount = motor_plate_nodes(group)
-    final = union_node(group, "Union V2 Body", body, mount)
+    body = union_node(group, "Union Mount and Arms", mount, arms)
+    final = union_node(group, "Union V3 Body", body, bumper)
     links.new(final, group_out.inputs["Geometry"])
     return group
 
@@ -557,6 +571,7 @@ def mesh_report(obj):
     try:
         bm.from_mesh(mesh)
         bm.verts.ensure_lookup_table()
+        coordinates = tuple(tuple(vertex.co) for vertex in mesh.vertices)
         seen = set()
         components = 0
         for vertex in bm.verts:
@@ -579,11 +594,29 @@ def mesh_report(obj):
             "components": components,
             "nonmanifold_edges": sum(not edge.is_manifold for edge in bm.edges),
             "volume_mm3": volume,
-            "dimensions": dimensions(tuple(tuple(vertex.co) for vertex in mesh.vertices)),
+            "dimensions": dimensions(coordinates),
+            "coordinates": coordinates,
         }
     finally:
         bm.free()
         evaluated.to_mesh_clear()
+
+
+def node_mesh_report(obj, node_name):
+    group = obj.modifiers[MODIFIER_NAME].node_group
+    output = group.nodes["Output"].inputs["Geometry"]
+    original_socket = output.links[0].from_socket
+    try:
+        for link in tuple(output.links):
+            group.links.remove(link)
+        group.links.new(group.nodes[node_name].outputs[0], output)
+        bpy.context.view_layer.update()
+        return mesh_report(obj)
+    finally:
+        for link in tuple(output.links):
+            group.links.remove(link)
+        group.links.new(original_socket, output)
+        bpy.context.view_layer.update()
 
 
 def hole_report(obj):
@@ -659,7 +692,17 @@ def self_check():
                 (minimum, maximum, default),
             )
         ), name
-    required = {"V3 Motor Plate", "V3 Through Cutters", "V3 Recess Cutters", "V3 Mount"}
+    required = {
+        "V3 Motor Plate",
+        "V3 Through Cutters",
+        "V3 Recess Cutters",
+        "V3 Mount",
+        "Open Bumper Arc",
+        "Primary Arm",
+        "Upper Fork",
+        "Lower Fork",
+        "Threefold Arm Instances",
+    }
     assert required <= {item.name for item in group.nodes}
     holes = hole_report(obj)
     assert len(holes) == 4
@@ -667,13 +710,16 @@ def self_check():
         assert math.dist(measured_hole["center"], expected) <= 0.02
         assert abs(measured_hole["through_radius"] - THROUGH_RADIUS) <= 0.03
         assert abs(measured_hole["recess_radius"] - RECESS_RADIUS) <= 0.03
-    assert {
-        "Primary Arm",
-        "Upper Fork",
-        "Lower Fork",
-        "Threefold Arm Instances",
-        "Union V2 Body",
-    } <= {item.name for item in group.nodes}, "Missing biomimetic arm network"
+    mount_and_arms = node_mesh_report(obj, "Union Mount and Arms")
+    assert mount_and_arms["components"] == 1, mount_and_arms
+    assert mount_and_arms["nonmanifold_edges"] == 0, mount_and_arms
+    bumper = node_mesh_report(obj, "Place Bumper")
+    bumper_angles = tuple(
+        math.degrees(math.atan2(y, x)) % 360.0 for x, y, _z in bumper["coordinates"]
+    )
+    assert bumper_angles
+    assert min(bumper_angles) >= 29.0, min(bumper_angles)
+    assert max(bumper_angles) <= 241.0, max(bumper_angles)
     for name, value in (
         ("Propeller Diameter (in)", 2.0),
         ("Guard Height (mm)", 12.0),
