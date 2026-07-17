@@ -25,6 +25,16 @@ Defaults will match the imported geometry as measured from the mesh.
 
 The fixed-mount vertex group is the upgrade contract: future procedural redesigns must continue to leave those vertices unchanged.
 
+## Future Swappable Motor Mounts
+
+The current motor mount remains unchanged in this version. A future upgrade may separate it into a replaceable mount module for different quadcopter motor sizes.
+
+- Treat the boundary between the arms and fixed hub as the stable guard-to-mount interface.
+- Keep guard parameters independent from mount dimensions.
+- Future mount modules may vary hole pattern, hub diameter, and fastener clearance while sharing that interface.
+- Preserve the current mount as the default module and reference geometry.
+- Do not build the module system until a second motor specification is available; its dimensions will define the real interface requirements.
+
 ## Blender Structure
 
 - Preserve the imported mesh as the modifier input.
@@ -34,7 +44,7 @@ The fixed-mount vertex group is the upgrade contract: future procedural redesign
 
 ## Limits and Validation
 
-Very large diameter or height values stretch the existing connecting arms; they do not redesign arm topology. That is acceptable for this first version and is the explicit upgrade point for a future fully procedural guard.
+Very large diameter or height values stretch the existing connecting arms; they do not redesign arm topology. That is acceptable for this first version and is the explicit upgrade point for a future fully procedural guard. Swappable motor mounts are also deferred until another motor specification provides concrete dimensions.
 
 Validation will check:
 
@@ -42,4 +52,3 @@ Validation will check:
 2. Inputs respect the stated minimum and maximum values.
 3. Outer diameter, height, and wall thickness match several test settings within mesh-resolution tolerance.
 4. The mesh remains connected and visually free of obvious folds at minimum, default, and maximum bounded settings.
-
