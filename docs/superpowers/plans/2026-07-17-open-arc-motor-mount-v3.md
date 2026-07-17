@@ -72,7 +72,7 @@ def hole_centers():
     return ((radius, 0.0), (0.0, radius), (-radius, 0.0), (0.0, -radius))
 ```
 
-Delete `FIXED_RADIUS`, `MOUNT_KEEP_RADIUS`, `mount_signature()`, `replace_attribute()`, and `build_source_attributes()`. Change `install()` to call only `install_modifier(get_guard())`.
+Delete `CENTER`, `FIXED_RADIUS`, `MOUNT_KEEP_RADIUS`, `mount_signature()`, `replace_attribute()`, and `build_source_attributes()`. Replace every bumper and arm XY placement that used `CENTER` with `MOTOR_CENTER`, so the complete V3 guard is concentric with the measured motor-hole pattern. Change `install()` to call only `install_modifier(get_guard())`.
 
 - [ ] **Step 4: Run the pure-Python syntax check**
 
