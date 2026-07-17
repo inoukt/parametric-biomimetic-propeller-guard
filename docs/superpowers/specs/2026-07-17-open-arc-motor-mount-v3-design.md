@@ -6,9 +6,9 @@ Correct the biomimetic propeller guard by replacing the disconnected imported hu
 
 ## Mount
 
-- Generate a new 3.3 mm-thick motor plate centered at `(2.204754, -2.317232)`.
+- Generate a new 3.3 mm-thick motor plate centered at local `(0, 0)`, the measured center of the imported four-hole pattern. The old guard-body center offset is not the motor center.
 - Use four M2 through-holes equally spaced at `(±6, 0)` and `(0, ±6)` mm from the mount center. Opposite hole centers are exactly 12 mm apart.
-- Measure the existing through-hole diameter and chamfer dimensions from the imported source mesh, then reproduce that profile on the new holes.
+- Reproduce the measured imported hole profile: 3.0 mm through diameter, plus a 4.5 mm lower recess from Z `-3.0034075` to `-1.6034075`; the 3.0 mm section continues to the top face at Z `0.2965926`.
 - The plate may change shape, but it must leave adequate material around every chamfer and must union directly with all three primary branches.
 - The 12 mm bolt circle is fixed hardware geometry, not another user parameter.
 
