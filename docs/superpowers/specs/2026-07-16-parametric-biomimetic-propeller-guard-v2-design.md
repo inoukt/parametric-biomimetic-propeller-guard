@@ -37,9 +37,9 @@ Swappable motor mounts remain deferred until a second motor specification exists
 
 Expose these controls through one clearly named Geometry Nodes modifier:
 
-- **Propeller Diameter (in):** presets for 2, 2.5, 3, 3.5, 4, and 5 inches. Internally these are 50.8, 63.5, 76.2, 88.9, 101.6, and 127 mm. Default: 2 inches.
+- **Propeller Diameter (in):** continuous 2–5-inch input with quick presets for 2, 2.5, 3, 3.5, 4, and 5 inches. Internally the presets are 50.8, 63.5, 76.2, 88.9, 101.6, and 127 mm. Default: 2 inches.
 - **Guard Height (mm):** 3–101.6 mm. Default: 12 mm.
-- **Bumper Thickness (mm):** changes the radial thickness of the continuous outer impact ring. Range: `max(3 × Nozzle Diameter, 1.2 mm)` through 8 mm. Default: 3.2 mm.
+- **Bumper Thickness (mm):** changes the radial thickness of the continuous outer impact ring. Input range: 1.2–8 mm; evaluated thickness is clamped to at least `3 × Nozzle Diameter`. Default: 3.2 mm.
 - **Strength / Weight:** normalized 0–1, where 0 is lightest and 1 is strongest. It changes rib width, branch thickness, fork reinforcement, fillet size, and organic-cell openness together. Default: 0.5.
 - **Nozzle Diameter (mm):** 0.4–0.8 mm. It sets manufacturing minimums but does not otherwise redesign the mount. Default: 0.4 mm.
 - **Safety Clearance Override (mm):** 0 uses the automatic clearance rule; a positive value replaces it. Default: 0.

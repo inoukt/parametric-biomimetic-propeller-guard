@@ -43,7 +43,7 @@
 - Produces: `get_guard() -> bpy.types.Object`
 - Produces: `mount_signature(obj) -> tuple[tuple[int, tuple[float, float, float]], ...]`
 - Produces: `sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0) -> dict[str, float]`
-- Produces point attribute `PG_V2_FixedMount` and face attribute `PG_V2_MountKeep`.
+- Reuses point attribute `PG_FixedMount` and produces face attribute `PG_V2_MountKeep`.
 
 - [ ] **Step 1: Write the failing sizing and attribute self-check**
 
@@ -80,7 +80,7 @@ def mount_signature(obj):
 
 def self_check():
     obj = get_guard()
-    assert obj.data.attributes.get("PG_V2_FixedMount")
+    assert obj.data.attributes.get("PG_FixedMount")
     assert obj.data.attributes.get("PG_V2_MountKeep")
     values = sizing(2.0, 12.0, 3.2, 0.5, 0.4)
     assert math.isclose(values["prop_mm"], 50.8)
@@ -109,13 +109,14 @@ Add:
 
 ```python
 def sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0):
-    assert prop_inches in PROP_PRESETS
+    assert 2.0 <= prop_inches <= 5.0
     assert 3.0 <= height <= 101.6
     assert 0.0 <= strength <= 1.0
     assert 0.4 <= nozzle <= 0.8
     prop_mm = prop_inches * 25.4
     min_feature = 3.0 * nozzle
-    assert max(min_feature, 1.2) <= bumper <= 8.0
+    assert 1.2 <= bumper <= 8.0
+    bumper = max(bumper, min_feature)
     clearance = clearance_override or max(2.0, 0.04 * prop_mm)
     inner_radius = prop_mm / 2.0 + clearance
     primary_width = max(min_feature, bumper * (0.55 + 0.25 * strength))
@@ -148,17 +149,19 @@ def replace_attribute(mesh, name, data_type, domain):
 def build_source_attributes(obj):
     mesh = obj.data
     cx, cy = CENTER
-    fixed = replace_attribute(mesh, "PG_V2_FixedMount", "FLOAT", "POINT")
+    fixed = replace_attribute(mesh, "PG_FixedMount", "FLOAT", "POINT")
     keep = replace_attribute(mesh, "PG_V2_MountKeep", "BOOLEAN", "FACE")
     for vertex in mesh.vertices:
         fixed.data[vertex.index].value = float(
             math.hypot(vertex.co.x - cx, vertex.co.y - cy) <= FIXED_RADIUS
         )
     for face in mesh.polygons:
-        keep.data[face.index].value = all(
+        radii = tuple(
             math.hypot(mesh.vertices[index].co.x - cx, mesh.vertices[index].co.y - cy)
-            <= MOUNT_KEEP_RADIUS
             for index in face.vertices
+        )
+        keep.data[face.index].value = any(radius <= FIXED_RADIUS for radius in radii) or all(
+            radius <= MOUNT_KEEP_RADIUS for radius in radii
         )
 ```
 
