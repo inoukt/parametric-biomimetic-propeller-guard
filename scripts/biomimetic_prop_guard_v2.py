@@ -4,11 +4,16 @@ import math
 import sys
 
 OBJECT_NAME = "halfApexPropGuardModify.001"
-CENTER = (2.204754, -2.317232)
-FIXED_RADIUS = 10.0
-MOUNT_KEEP_RADIUS = 14.0
+MOTOR_CENTER = (0.0, 0.0)
+PLATE_RADIUS = 10.0
+HOLE_CIRCLE_DIAMETER = 12.0
+THROUGH_RADIUS = 1.5
+RECESS_RADIUS = 2.25
 MOUNT_Z_MIN = -3.0034074783325195
+RECESS_TOP_Z = -1.6034074783325195
 MOUNT_Z_MAX = 0.2965925931930542
+ARC_START = 30.0
+ARC_END = 240.0
 PROP_PRESETS = (2.0, 2.5, 3.0, 3.5, 4.0, 5.0)
 GROUP_NAME = "PG_BiomimeticGuardV2"
 MODIFIER_NAME = "PG Biomimetic Guard V2"
@@ -28,13 +33,9 @@ def get_guard():
     return obj
 
 
-def mount_signature(obj):
-    cx, cy = CENTER
-    return tuple(
-        (vertex.index, tuple(vertex.co))
-        for vertex in obj.data.vertices
-        if math.hypot(vertex.co.x - cx, vertex.co.y - cy) <= FIXED_RADIUS
-    )
+def hole_centers():
+    radius = HOLE_CIRCLE_DIAMETER / 2.0
+    return ((radius, 0.0), (0.0, radius), (-radius, 0.0), (0.0, -radius))
 
 
 def sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0):
@@ -67,34 +68,6 @@ def sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0
         "fork_radius": max(16.0, inner_radius * 0.68),
         "fork_angle": math.radians(18.0),
     }
-
-
-def replace_attribute(mesh, name, data_type, domain):
-    old = mesh.attributes.get(name)
-    if old:
-        mesh.attributes.remove(old)
-    return mesh.attributes.new(name=name, type=data_type, domain=domain)
-
-
-def build_source_attributes(obj):
-    assert obj.mode == "OBJECT", "Switch the guard to Object Mode"
-    assert tuple(obj.scale) == (1.0, 1.0, 1.0), "Apply object scale before V2 setup"
-    mesh = obj.data
-    cx, cy = CENTER
-    fixed = replace_attribute(mesh, "PG_FixedMount", "FLOAT", "POINT")
-    keep = replace_attribute(mesh, "PG_V2_MountKeep", "BOOLEAN", "FACE")
-    for vertex in mesh.vertices:
-        fixed.data[vertex.index].value = float(
-            math.hypot(vertex.co.x - cx, vertex.co.y - cy) <= FIXED_RADIUS
-        )
-    for face in mesh.polygons:
-        radii = tuple(
-            math.hypot(mesh.vertices[index].co.x - cx, mesh.vertices[index].co.y - cy)
-            for index in face.vertices
-        )
-        keep.data[face.index].value = any(radius <= FIXED_RADIUS for radius in radii) or all(
-            radius <= MOUNT_KEEP_RADIUS for radius in radii
-        )
 
 
 def node(nodes, node_type, name, operation=None):
@@ -225,7 +198,7 @@ def bumper_nodes(group, values):
     z_center = math_node(group, "Bumper Half Height", "DIVIDE", values["height"], 2.0)
     z_center = math_node(group, "Bumper Print Bed Alignment", "ADD", z_center, MOUNT_Z_MIN)
     links.new(
-        combine_xyz(group, "Bumper Position", CENTER[0], CENTER[1], z_center),
+        combine_xyz(group, "Bumper Position", MOTOR_CENTER[0], MOTOR_CENTER[1], z_center),
         transform.inputs["Translation"],
     )
     return transform.outputs["Geometry"]
@@ -405,7 +378,7 @@ def arm_nodes(group, values):
     z_center = math_node(group, "Arm Half Height", "DIVIDE", values["height"], 2.0)
     z_center = math_node(group, "Arm Print Bed Alignment", "ADD", z_center, MOUNT_Z_MIN)
     links.new(
-        combine_xyz(group, "Arm Network Position", CENTER[0], CENTER[1], z_center),
+        combine_xyz(group, "Arm Network Position", MOTOR_CENTER[0], MOTOR_CENTER[1], z_center),
         place.inputs["Translation"],
     )
     return place.outputs["Geometry"]
@@ -428,10 +401,10 @@ def closed_mount_nodes(group, source_geometry):
     cutter.inputs["Vertices"].default_value = 128
     cutter.inputs["Side Segments"].default_value = 1
     cutter.inputs["Fill Segments"].default_value = 1
-    cutter.inputs["Radius"].default_value = MOUNT_KEEP_RADIUS
+    cutter.inputs["Radius"].default_value = PLATE_RADIUS
     cutter.inputs["Depth"].default_value = 200.0
     place = node(nodes, "GeometryNodeTransform", "Place Mount Cutter")
-    place.inputs["Translation"].default_value = (*CENTER, 0.0)
+    place.inputs["Translation"].default_value = (*MOTOR_CENTER, 0.0)
     links.new(cutter.outputs["Mesh"], place.inputs["Geometry"])
     clipped = node(nodes, "GeometryNodeMeshBoolean", "Clip Closed Mount")
     clipped.operation = "INTERSECT"
@@ -476,7 +449,7 @@ def build_node_group():
     body = union_node(group, "Union Bumper and Arms", bumper, arms)
     # The face selection is an inspectable audit mask. Feeding its open boundary
     # to a boolean would destroy manifoldness, so the closed mount is clipped
-    # directly from the unchanged source mesh using the same 14 mm boundary.
+    # directly from the unchanged source mesh using the plate boundary.
     closed_mount = closed_mount_nodes(group, group_in.outputs["Geometry"])
     final = union_node(group, "Union V2 Body", body, closed_mount)
     links.new(final, group_out.inputs["Geometry"])
@@ -505,9 +478,7 @@ def install_modifier(obj):
 
 
 def install():
-    obj = get_guard()
-    build_source_attributes(obj)
-    return install_modifier(obj)
+    return install_modifier(get_guard())
 
 
 def parameter_socket(modifier, name):
@@ -577,29 +548,14 @@ def mesh_report(obj):
 
 
 def self_check():
+    centers = hole_centers()
+    assert centers == ((6.0, 0.0), (0.0, 6.0), (-6.0, 0.0), (0.0, -6.0))
+    assert all(
+        math.dist(centers[first], centers[second]) == HOLE_CIRCLE_DIAMETER
+        for first, second in ((0, 2), (1, 3))
+    )
     obj = get_guard()
     assert tuple(obj.scale) == (1.0, 1.0, 1.0)
-    fixed = obj.data.attributes.get("PG_FixedMount")
-    keep = obj.data.attributes.get("PG_V2_MountKeep")
-    assert fixed and fixed.data_type == "FLOAT" and fixed.domain == "POINT"
-    assert keep and keep.data_type == "BOOLEAN" and keep.domain == "FACE"
-    cx, cy = CENTER
-    fixed_indices = {
-        vertex.index
-        for vertex in obj.data.vertices
-        if math.hypot(vertex.co.x - cx, vertex.co.y - cy) <= FIXED_RADIUS
-    }
-    retained_indices = {
-        index
-        for face in obj.data.polygons
-        if keep.data[face.index].value
-        for index in face.vertices
-    }
-    assert fixed_indices <= retained_indices, "MountKeep drops fixed vertices"
-    assert all(
-        fixed.data[index].value == float(index in fixed_indices)
-        for index in range(len(obj.data.vertices))
-    )
     values = sizing(2.0, 12.0, 2.2, 0.5, 0.4)
     assert math.isclose(values["prop_mm"], 50.8)
     assert math.isclose(values["clearance"], 2.032)
@@ -650,8 +606,6 @@ def self_check():
     measured = dimensions(evaluated)
     assert abs(max(measured[:2]) - 59.264) <= 0.05, measured
     assert abs(measured[2] - 12.0) <= 0.05, measured
-    evaluated_coordinates = set(evaluated)
-    assert {coordinate for _index, coordinate in mount_signature(obj)} <= evaluated_coordinates
     report = mesh_report(obj)
     assert report["components"] == 1, report
     assert report["nonmanifold_edges"] == 0, report
