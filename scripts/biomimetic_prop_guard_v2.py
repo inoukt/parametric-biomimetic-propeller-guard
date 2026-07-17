@@ -25,6 +25,21 @@ PARAMETERS = {
     "Nozzle Diameter (mm)": (0.4, 0.8, 0.4),
     "Safety Clearance Override (mm)": (0.0, 1_000_000.0, 0.0),
 }
+VALIDATION_CASES = (
+    (2.0, 12.0, 2.2, 0.5, 0.4, 0.0),
+    (2.5, 12.0, 2.2, 0.5, 0.4, 0.0),
+    (3.0, 12.0, 2.2, 0.5, 0.4, 0.0),
+    (3.5, 12.0, 2.2, 0.5, 0.4, 0.0),
+    (4.0, 12.0, 2.2, 0.5, 0.4, 0.0),
+    (5.0, 12.0, 2.2, 0.5, 0.4, 0.0),
+    (2.0, 3.3, 1.2, 0.0, 0.4, 0.0),
+    (2.0, 101.6, 8.0, 1.0, 0.8, 0.0),
+    (5.0, 3.3, 1.2, 0.0, 0.4, 0.0),
+    (5.0, 101.6, 8.0, 1.0, 0.8, 0.0),
+    (2.5, 3.3, 1.2, 0.0, 0.8, 0.0),
+    (3.5, 12.0, 2.2, 0.5, 0.4, 3.0),
+    (4.3, 24.0, 2.0, 0.25, 0.6, 0.0),
+)
 
 
 def get_guard():
@@ -480,7 +495,7 @@ def motor_plate_nodes(group):
     place_recess.inputs["Translation"].default_value = (
         0.0,
         0.0,
-        (MOUNT_Z_MIN + RECESS_TOP_Z) / 2.0,
+        (MOUNT_Z_MIN + RECESS_TOP_Z) / 2.0 - 0.05,
     )
     links.new(recess.outputs["Mesh"], place_recess.inputs["Geometry"])
 
@@ -680,7 +695,15 @@ def hole_report(obj):
             if abs(co[2] - MOUNT_Z_MIN) < 1e-4
             and 2.0 < math.hypot(co[0] - expected_x, co[1] - expected_y) < 2.5
         ]
-        assert top and bottom
+        shoulder = [
+            co
+            for co in vertices
+            if MOUNT_Z_MIN + 0.2 < co[2] < MOUNT_Z_MAX - 0.2
+            and 2.0
+            < math.hypot(co[0] - expected_x, co[1] - expected_y)
+            < 2.5
+        ]
+        assert top and bottom and shoulder
         center = (
             sum(co[0] for co in top) / len(top),
             sum(co[1] for co in top) / len(top),
@@ -697,6 +720,7 @@ def hole_report(obj):
                     for co in bottom
                 )
                 / len(bottom),
+                "recess_top_z": sum(co[2] for co in shoulder) / len(shoulder),
             }
         )
     return tuple(reports)
@@ -763,6 +787,7 @@ def self_check():
         assert math.dist(measured_hole["center"], expected) <= 0.02
         assert abs(measured_hole["through_radius"] - THROUGH_RADIUS) <= 0.03
         assert abs(measured_hole["recess_radius"] - RECESS_RADIUS) <= 0.03
+        assert abs(measured_hole["recess_top_z"] - RECESS_TOP_Z) <= 0.02
     mount_and_arms = node_mesh_report(obj, "Union Mount and Arms")
     assert mount_and_arms["components"] == 1, mount_and_arms
     assert mount_and_arms["nonmanifold_edges"] == 0, mount_and_arms
@@ -810,16 +835,40 @@ def self_check():
             obj[key] = value
         obj["PG_V3_Defaults"] = defaults
 
-    low_case = (2.0, 3.3, 1.2, 0.0, 0.4, 0.0)
     try:
-        for name, value in zip(PARAMETERS, low_case):
-            set_parameter(modifier, name, value)
-        bpy.context.view_layer.update()
-        low_report = mesh_report(obj)
-        assert (low_report["components"], low_report["nonmanifold_edges"]) == (1, 0), (
-            low_report["components"],
-            low_report["nonmanifold_edges"],
-        )
+        for case in VALIDATION_CASES:
+            for name, value in zip(PARAMETERS, case):
+                set_parameter(modifier, name, value)
+            bpy.context.view_layer.update()
+            expected = sizing(*case)
+            case_report = mesh_report(obj)
+            assert (
+                case_report["components"],
+                case_report["nonmanifold_edges"],
+            ) == (1, 0), (case, case_report["components"], case_report["nonmanifold_edges"])
+            radial_diameter = 2.0 * max(
+                math.hypot(x, y) for x, y, _z in case_report["coordinates"]
+            )
+            assert abs(radial_diameter - expected["outer_diameter"]) <= 0.05, (
+                case,
+                radial_diameter,
+            )
+            assert abs(case_report["dimensions"][2] - case[1]) <= 0.05, (
+                case,
+                case_report["dimensions"],
+            )
+            for measured_hole, expected_center in zip(
+                hole_report(obj), hole_centers()
+            ):
+                assert math.dist(measured_hole["center"], expected_center) <= 0.02, case
+                assert abs(measured_hole["through_radius"] - THROUGH_RADIUS) <= 0.03, case
+                assert abs(measured_hole["recess_radius"] - RECESS_RADIUS) <= 0.03, case
+                assert abs(measured_hole["recess_top_z"] - RECESS_TOP_Z) <= 0.02, case
+            isolated = node_mesh_report(obj, "Union Mount and Arms")
+            assert (isolated["components"], isolated["nonmanifold_edges"]) == (
+                1,
+                0,
+            ), (case, isolated["components"], isolated["nonmanifold_edges"])
     finally:
         for name, (_minimum, _maximum, default) in PARAMETERS.items():
             set_parameter(modifier, name, default)
