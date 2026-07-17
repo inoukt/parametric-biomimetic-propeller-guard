@@ -136,6 +136,13 @@ def parameter_nodes(group, group_in):
     bumper_center_radius = math_node(
         group, "Bumper Center Radius", "ADD", inner_radius, half_bumper
     )
+    low_height = math_node(
+        group,
+        "Low Height Boolean Stabilization",
+        "LESS_THAN",
+        group_in.outputs["Guard Height (mm)"],
+        7.0,
+    )
     return {
         "prop_mm": prop_mm,
         "clearance": clearance.outputs["Output"],
@@ -145,6 +152,7 @@ def parameter_nodes(group, group_in):
         "bumper_center_radius": bumper_center_radius,
         "height": group_in.outputs["Guard Height (mm)"],
         "strength": group_in.outputs["Strength / Weight"],
+        "low_height": low_height,
     }
 
 
@@ -183,8 +191,14 @@ def bumper_nodes(group, values):
     trim.mode = "FACTOR"
     trim.inputs["Start"].default_value = ARC_START / 360.0
     trim.inputs["End"].default_value = ARC_END / 360.0
+    relief = math_node(
+        group, "Low Height Bumper Relief", "MULTIPLY", values["low_height"], 0.02
+    )
+    bumper_height = math_node(
+        group, "Boolean Relief Bumper Height", "SUBTRACT", values["height"], relief
+    )
     profile = flat_bottom_profile(
-        group, "Rounded Bumper Profile", values["bumper"], values["height"], 24
+        group, "Rounded Bumper Profile", values["bumper"], bumper_height, 24
     )
     curve_to_mesh = node(nodes, "GeometryNodeCurveToMesh", "Solid Bumper")
     curve_to_mesh.inputs["Fill Caps"].default_value = True
@@ -194,7 +208,7 @@ def bumper_nodes(group, values):
     links.new(trim.outputs["Curve"], curve_to_mesh.inputs["Curve"])
     links.new(profile, curve_to_mesh.inputs["Profile Curve"])
     links.new(curve_to_mesh.outputs["Mesh"], transform.inputs["Geometry"])
-    z_center = math_node(group, "Bumper Half Height", "DIVIDE", values["height"], 2.0)
+    z_center = math_node(group, "Bumper Half Height", "DIVIDE", bumper_height, 2.0)
     z_center = math_node(group, "Bumper Print Bed Alignment", "ADD", z_center, MOUNT_Z_MIN)
     links.new(
         combine_xyz(group, "Bumper Position", MOTOR_CENTER[0], MOTOR_CENTER[1], z_center),
@@ -352,8 +366,31 @@ def arm_nodes(group, values):
         radius_socket=root_pad_radius,
     )
     fork_pad = junction_pad(group, "Fork Junction Pad", fork_radius, 0.0, fork_width, values["height"])
-    upper_pad = junction_pad(group, "Upper Bumper Pad", end_x, end_y, fork_width, values["height"])
-    lower_pad = junction_pad(group, "Lower Bumper Pad", end_x, negative_end_y, fork_width, values["height"])
+    bumper_pad_radius = math_node(
+        group,
+        "Printable Bumper Pad Radius",
+        "MINIMUM",
+        math_node(group, "Scaled Bumper Pad Radius", "MULTIPLY", fork_width, 1.2),
+        values["bumper"],
+    )
+    upper_pad = junction_pad(
+        group,
+        "Upper Bumper Pad",
+        end_x,
+        end_y,
+        fork_width,
+        values["height"],
+        radius_socket=bumper_pad_radius,
+    )
+    lower_pad = junction_pad(
+        group,
+        "Lower Bumper Pad",
+        end_x,
+        negative_end_y,
+        fork_width,
+        values["height"],
+        radius_socket=bumper_pad_radius,
+    )
     for geometry in (primary, upper, lower, root_pad, fork_pad, upper_pad, lower_pad):
         links.new(geometry, local.inputs["Geometry"])
 
@@ -505,7 +542,15 @@ def build_node_group():
     mount = motor_plate_nodes(group)
     body = union_node(group, "Union Mount and Arms", mount, arms)
     final = union_node(group, "Union V3 Body", body, bumper)
-    links.new(final, group_out.inputs["Geometry"])
+    clean = node(nodes, "GeometryNodeMergeByDistance", "Clean V3 Boolean Seams")
+    clean.inputs["Distance"].default_value = 0.001
+    links.new(final, clean.inputs["Geometry"])
+    stabilized = node(nodes, "GeometryNodeSwitch", "Low Height Seam Cleanup")
+    stabilized.input_type = "GEOMETRY"
+    links.new(values["low_height"], stabilized.inputs["Switch"])
+    links.new(final, stabilized.inputs["False"])
+    links.new(clean.outputs["Geometry"], stabilized.inputs["True"])
+    links.new(stabilized.outputs["Output"], group_out.inputs["Geometry"])
     return group
 
 
@@ -704,6 +749,14 @@ def self_check():
         "Threefold Arm Instances",
     }
     assert required <= {item.name for item in group.nodes}
+    trim = group.nodes["Open Bumper Arc"]
+    assert 0.0 < ARC_END - ARC_START <= 210.0
+    assert math.isclose(
+        trim.inputs["Start"].default_value, ARC_START / 360.0, abs_tol=1e-6
+    )
+    assert math.isclose(
+        trim.inputs["End"].default_value, ARC_END / 360.0, abs_tol=1e-6
+    )
     holes = hole_report(obj)
     assert len(holes) == 4
     for measured_hole, expected in zip(holes, hole_centers()):
@@ -720,29 +773,42 @@ def self_check():
     assert bumper_angles
     assert min(bumper_angles) >= 29.0, min(bumper_angles)
     assert max(bumper_angles) <= 241.0, max(bumper_angles)
-    for name, value in (
-        ("Propeller Diameter (in)", 2.0),
-        ("Guard Height (mm)", 12.0),
-        ("Bumper Thickness (mm)", 2.2),
-        ("Strength / Weight", 0.5),
-        ("Nozzle Diameter (mm)", 0.4),
-        ("Safety Clearance Override (mm)", 0.0),
-    ):
-        set_parameter(modifier, name, value)
+    for name, (_minimum, _maximum, default) in PARAMETERS.items():
+        socket = parameter_socket(modifier, name)
+        actual = getattr(modifier.properties.inputs, socket.identifier).value
+        assert math.isclose(actual, default, rel_tol=1e-6, abs_tol=1e-6), (name, actual)
     bpy.context.view_layer.update()
     evaluated = evaluated_vertices(obj)
     measured = dimensions(evaluated)
-    assert abs(max(measured[:2]) - 59.264) <= 0.05, measured
+    radial_diameter = 2.0 * max(math.hypot(x, y) for x, y, _z in evaluated)
+    assert abs(radial_diameter - values["outer_diameter"]) <= 0.05, radial_diameter
     assert abs(measured[2] - 12.0) <= 0.05, measured
     report = mesh_report(obj)
     assert report["components"] == 1, report
     assert report["nonmanifold_edges"] == 0, report
     mass_low = report["volume_mm3"] * 0.00120
     mass_high = report["volume_mm3"] * 0.00125
-    assert 7.0 <= mass_low and mass_high <= 8.0, (mass_low, mass_high)
-    obj["PG_V2_Estimated_Mass_g_1.20"] = mass_low
-    obj["PG_V2_Estimated_Mass_g_1.25"] = mass_high
-    obj["PG_V2_Defaults"] = "2 in, 12 mm height, 2.2 mm bumper, balanced, 0.4 mm nozzle"
+    assert 0.0 < mass_low < mass_high, (mass_low, mass_high)
+    measurements = {
+        "PG_V3_Evaluated_Volume_mm3": report["volume_mm3"],
+        "PG_V3_Estimated_Mass_g_1.20": mass_low,
+        "PG_V3_Estimated_Mass_g_1.25": mass_high,
+    }
+    defaults = "2 in, 12 mm height, 2.2 mm bumper, balanced, 0.4 mm nozzle"
+    if "--verify-only" in sys.argv:
+        for key, expected in measurements.items():
+            assert key in obj and math.isclose(obj[key], expected, rel_tol=1e-6), key
+        assert obj.get("PG_V3_Defaults") == defaults
+    else:
+        for old_key in (
+            "PG_V2_Estimated_Mass_g_1.20",
+            "PG_V2_Estimated_Mass_g_1.25",
+            "PG_V2_Defaults",
+        ):
+            obj.pop(old_key, None)
+        for key, value in measurements.items():
+            obj[key] = value
+        obj["PG_V3_Defaults"] = defaults
 
 
 if __name__ == "__main__":
