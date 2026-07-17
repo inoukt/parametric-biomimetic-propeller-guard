@@ -77,6 +77,38 @@ def build_attributes(obj):
                 for vertex_index in face.vertices:
                     normal_sums[vertex_index] += xy_normal
 
+    parent = list(range(len(mesh.vertices)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for edge in mesh.edges:
+        a, b = edge.vertices
+        if (mesh.vertices[a].co - mesh.vertices[b].co).length < 0.1:
+            a, b = find(a), find(b)
+            if a != b:
+                parent[b] = a
+
+    clusters = defaultdict(list)
+    for index in range(len(mesh.vertices)):
+        clusters[find(index)].append(index)
+    for members in clusters.values():
+        protected = any(
+            index in outer_vertices
+            or math.hypot(mesh.vertices[index].co.x - cx, mesh.vertices[index].co.y - cy) <= FIXED_RADIUS
+            for index in members
+        )
+        combined = sum((normal_sums[index] for index in members), Vector((0.0, 0.0, 0.0)))
+        if protected or not combined.length:
+            combined = Vector((0.0, 0.0, 0.0))
+        else:
+            combined.normalize()
+        for index in members:
+            normal_sums[index] = combined.copy()
+
     for vertex in mesh.vertices:
         radius = math.hypot(vertex.co.x - cx, vertex.co.y - cy)
         fixed.data[vertex.index].value = float(radius <= FIXED_RADIUS)
@@ -406,6 +438,15 @@ def self_check():
                 assert all(abs(value - thickness) <= 0.05 for value in measured), (
                     thickness, min(measured), max(measured)
                 )
+                for edge in obj.data.edges:
+                    a, b = edge.vertices
+                    base_edge = (obj.data.vertices[a].co - obj.data.vertices[b].co).length
+                    if base_edge < 0.1:
+                        movement_a = Vector(vertices[a]) - Vector(baseline_vertices[a])
+                        movement_b = Vector(vertices[b]) - Vector(baseline_vertices[b])
+                        assert (movement_a - movement_b).length <= 0.05, (
+                            "Thickness split near-duplicate vertices", a, b
+                        )
             results.append((diameter, height, thickness, dimensions, guard_height))
     finally:
         for name, value in (
