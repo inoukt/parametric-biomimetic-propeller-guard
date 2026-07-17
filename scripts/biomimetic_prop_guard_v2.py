@@ -810,6 +810,21 @@ def self_check():
             obj[key] = value
         obj["PG_V3_Defaults"] = defaults
 
+    low_case = (2.0, 3.3, 1.2, 0.0, 0.4, 0.0)
+    try:
+        for name, value in zip(PARAMETERS, low_case):
+            set_parameter(modifier, name, value)
+        bpy.context.view_layer.update()
+        low_report = mesh_report(obj)
+        assert (low_report["components"], low_report["nonmanifold_edges"]) == (1, 0), (
+            low_report["components"],
+            low_report["nonmanifold_edges"],
+        )
+    finally:
+        for name, (_minimum, _maximum, default) in PARAMETERS.items():
+            set_parameter(modifier, name, default)
+        bpy.context.view_layer.update()
+
 
 if __name__ == "__main__":
     if "--verify-only" not in sys.argv:
