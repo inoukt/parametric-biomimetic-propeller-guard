@@ -78,13 +78,6 @@ def node(nodes, node_type, name, operation=None):
     return result
 
 
-def named_attribute(nodes, name, data_type):
-    result = node(nodes, "GeometryNodeInputNamedAttribute", name)
-    result.data_type = data_type
-    result.inputs["Name"].default_value = name
-    return result
-
-
 def _set_or_link(links, socket, value):
     if hasattr(value, "is_output"):
         links.new(value, socket)
@@ -395,25 +388,79 @@ def union_node(group, name, first, second):
     return result.outputs["Mesh"]
 
 
-def closed_mount_nodes(group, source_geometry):
+def motor_plate_nodes(group):
     nodes, links = group.nodes, group.links
-    cutter = node(nodes, "GeometryNodeMeshCylinder", "Mount Interface Cutter")
-    cutter.inputs["Vertices"].default_value = 128
-    cutter.inputs["Side Segments"].default_value = 1
-    cutter.inputs["Fill Segments"].default_value = 1
-    cutter.inputs["Radius"].default_value = PLATE_RADIUS
-    cutter.inputs["Depth"].default_value = 200.0
-    place = node(nodes, "GeometryNodeTransform", "Place Mount Cutter")
-    place.inputs["Translation"].default_value = (*MOTOR_CENTER, 0.0)
-    links.new(cutter.outputs["Mesh"], place.inputs["Geometry"])
-    clipped = node(nodes, "GeometryNodeMeshBoolean", "Clip Closed Mount")
-    clipped.operation = "INTERSECT"
-    clipped.solver = "EXACT"
-    clipped.inputs["Self Intersection"].default_value = True
-    clipped.inputs["Hole Tolerant"].default_value = True
-    links.new(source_geometry, clipped.inputs[1])
-    links.new(place.outputs["Geometry"], clipped.inputs[1])
-    return clipped.outputs["Mesh"]
+    plate = node(nodes, "GeometryNodeMeshCylinder", "V3 Motor Plate")
+    plate.inputs["Vertices"].default_value = 128
+    plate.inputs["Radius"].default_value = PLATE_RADIUS
+    plate.inputs["Depth"].default_value = MOUNT_Z_MAX - MOUNT_Z_MIN
+    place_plate = node(nodes, "GeometryNodeTransform", "Place V3 Motor Plate")
+    place_plate.inputs["Translation"].default_value = (
+        *MOTOR_CENTER,
+        (MOUNT_Z_MIN + MOUNT_Z_MAX) / 2.0,
+    )
+    links.new(plate.outputs["Mesh"], place_plate.inputs["Geometry"])
+
+    points_curve = node(nodes, "GeometryNodeCurvePrimitiveCircle", "V3 Hole Circle")
+    points_curve.mode = "RADIUS"
+    points_curve.inputs["Resolution"].default_value = 4
+    points_curve.inputs["Radius"].default_value = HOLE_CIRCLE_DIAMETER / 2.0
+    points = node(nodes, "GeometryNodeCurveToPoints", "V3 Hole Points")
+    points.mode = "EVALUATED"
+    links.new(points_curve.outputs["Curve"], points.inputs["Curve"])
+
+    through = node(nodes, "GeometryNodeMeshCylinder", "V3 Through Cutter")
+    through.inputs["Vertices"].default_value = 48
+    through.inputs["Radius"].default_value = THROUGH_RADIUS
+    through.inputs["Depth"].default_value = MOUNT_Z_MAX - MOUNT_Z_MIN + 0.2
+    place_through = node(nodes, "GeometryNodeTransform", "Place V3 Through Cutter")
+    place_through.inputs["Translation"].default_value = (
+        0.0,
+        0.0,
+        (MOUNT_Z_MIN + MOUNT_Z_MAX) / 2.0,
+    )
+    links.new(through.outputs["Mesh"], place_through.inputs["Geometry"])
+
+    recess = node(nodes, "GeometryNodeMeshCylinder", "V3 Recess Cutter")
+    recess.inputs["Vertices"].default_value = 48
+    recess.inputs["Radius"].default_value = RECESS_RADIUS
+    recess.inputs["Depth"].default_value = RECESS_TOP_Z - MOUNT_Z_MIN + 0.1
+    place_recess = node(nodes, "GeometryNodeTransform", "Place V3 Recess Cutter")
+    place_recess.inputs["Translation"].default_value = (
+        0.0,
+        0.0,
+        (MOUNT_Z_MIN + RECESS_TOP_Z) / 2.0,
+    )
+    links.new(recess.outputs["Mesh"], place_recess.inputs["Geometry"])
+
+    through_instances = node(
+        nodes, "GeometryNodeInstanceOnPoints", "Instance V3 Through Cutters"
+    )
+    through_realized = node(nodes, "GeometryNodeRealizeInstances", "V3 Through Cutters")
+    links.new(points.outputs["Points"], through_instances.inputs["Points"])
+    links.new(place_through.outputs["Geometry"], through_instances.inputs["Instance"])
+    links.new(through_instances.outputs["Instances"], through_realized.inputs["Geometry"])
+
+    recess_instances = node(
+        nodes, "GeometryNodeInstanceOnPoints", "Instance V3 Recess Cutters"
+    )
+    recess_realized = node(nodes, "GeometryNodeRealizeInstances", "V3 Recess Cutters")
+    links.new(points.outputs["Points"], recess_instances.inputs["Points"])
+    links.new(place_recess.outputs["Geometry"], recess_instances.inputs["Instance"])
+    links.new(recess_instances.outputs["Instances"], recess_realized.inputs["Geometry"])
+
+    subtract_through = node(nodes, "GeometryNodeMeshBoolean", "Cut V3 Through Holes")
+    subtract_through.operation = "DIFFERENCE"
+    subtract_through.solver = "EXACT"
+    links.new(place_plate.outputs["Geometry"], subtract_through.inputs[0])
+    links.new(through_realized.outputs["Geometry"], subtract_through.inputs[1])
+
+    mount = node(nodes, "GeometryNodeMeshBoolean", "V3 Mount")
+    mount.operation = "DIFFERENCE"
+    mount.solver = "EXACT"
+    links.new(subtract_through.outputs["Mesh"], mount.inputs[0])
+    links.new(recess_realized.outputs["Geometry"], mount.inputs[1])
+    return mount.outputs["Mesh"]
 
 
 def build_node_group():
@@ -438,20 +485,12 @@ def build_node_group():
     nodes, links = group.nodes, group.links
     group_in = node(nodes, "NodeGroupInput", "Inputs")
     group_out = node(nodes, "NodeGroupOutput", "Output")
-    keep = named_attribute(nodes, "PG_V2_MountKeep", "BOOLEAN")
-    separate = node(nodes, "GeometryNodeSeparateGeometry", "Keep Fixed Mount")
-    separate.domain = "FACE"
-    links.new(group_in.outputs["Geometry"], separate.inputs["Geometry"])
-    links.new(keep.outputs["Attribute"], separate.inputs["Selection"])
     values = parameter_nodes(group, group_in)
     bumper = bumper_nodes(group, values)
     arms = arm_nodes(group, values)
     body = union_node(group, "Union Bumper and Arms", bumper, arms)
-    # The face selection is an inspectable audit mask. Feeding its open boundary
-    # to a boolean would destroy manifoldness, so the closed mount is clipped
-    # directly from the unchanged source mesh using the plate boundary.
-    closed_mount = closed_mount_nodes(group, group_in.outputs["Geometry"])
-    final = union_node(group, "Union V2 Body", body, closed_mount)
+    mount = motor_plate_nodes(group)
+    final = union_node(group, "Union V2 Body", body, mount)
     links.new(final, group_out.inputs["Geometry"])
     return group
 
@@ -547,6 +586,44 @@ def mesh_report(obj):
         evaluated.to_mesh_clear()
 
 
+def hole_report(obj):
+    vertices = evaluated_vertices(obj)
+    reports = []
+    for expected_x, expected_y in hole_centers():
+        top = [
+            co
+            for co in vertices
+            if abs(co[2] - MOUNT_Z_MAX) < 1e-4
+            and 1.2 < math.hypot(co[0] - expected_x, co[1] - expected_y) < 1.8
+        ]
+        bottom = [
+            co
+            for co in vertices
+            if abs(co[2] - MOUNT_Z_MIN) < 1e-4
+            and 2.0 < math.hypot(co[0] - expected_x, co[1] - expected_y) < 2.5
+        ]
+        assert top and bottom
+        center = (
+            sum(co[0] for co in top) / len(top),
+            sum(co[1] for co in top) / len(top),
+        )
+        reports.append(
+            {
+                "center": center,
+                "through_radius": sum(
+                    math.hypot(co[0] - center[0], co[1] - center[1]) for co in top
+                )
+                / len(top),
+                "recess_radius": sum(
+                    math.hypot(co[0] - expected_x, co[1] - expected_y)
+                    for co in bottom
+                )
+                / len(bottom),
+            }
+        )
+    return tuple(reports)
+
+
 def self_check():
     centers = hole_centers()
     assert centers == ((6.0, 0.0), (0.0, 6.0), (-6.0, 0.0), (0.0, -6.0))
@@ -582,9 +659,14 @@ def self_check():
                 (minimum, maximum, default),
             )
         ), name
-    assert {"PG_V2_MountKeep", "Keep Fixed Mount", "Union V2 Body"} <= {
-        item.name for item in group.nodes
-    }
+    required = {"V3 Motor Plate", "V3 Through Cutters", "V3 Recess Cutters", "V3 Mount"}
+    assert required <= {item.name for item in group.nodes}
+    holes = hole_report(obj)
+    assert len(holes) == 4
+    for measured_hole, expected in zip(holes, hole_centers()):
+        assert math.dist(measured_hole["center"], expected) <= 0.02
+        assert abs(measured_hole["through_radius"] - THROUGH_RADIUS) <= 0.03
+        assert abs(measured_hole["recess_radius"] - RECESS_RADIUS) <= 0.03
     assert {
         "Primary Arm",
         "Upper Fork",
