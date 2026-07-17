@@ -109,6 +109,95 @@ def named_attribute(nodes, name, data_type):
     return result
 
 
+def _set_or_link(links, socket, value):
+    if hasattr(value, "is_output"):
+        links.new(value, socket)
+    else:
+        socket.default_value = value
+
+
+def math_node(group, name, operation, left, right):
+    result = node(group.nodes, "ShaderNodeMath", name, operation)
+    _set_or_link(group.links, result.inputs[0], left)
+    _set_or_link(group.links, result.inputs[1], right)
+    return result.outputs[0]
+
+
+def parameter_nodes(group, group_in):
+    prop_mm = math_node(
+        group, "Propeller Millimetres", "MULTIPLY", group_in.outputs["Propeller Diameter (in)"], 25.4
+    )
+    auto_clearance = math_node(
+        group, "Scaled Clearance", "MULTIPLY", prop_mm, 0.04
+    )
+    auto_clearance = math_node(group, "Minimum Clearance", "MAXIMUM", auto_clearance, 2.0)
+    use_override = math_node(
+        group,
+        "Use Clearance Override",
+        "GREATER_THAN",
+        group_in.outputs["Safety Clearance Override (mm)"],
+        0.0,
+    )
+    clearance = node(group.nodes, "GeometryNodeSwitch", "Clearance")
+    clearance.input_type = "FLOAT"
+    group.links.new(use_override, clearance.inputs["Switch"])
+    group.links.new(auto_clearance, clearance.inputs["False"])
+    group.links.new(
+        group_in.outputs["Safety Clearance Override (mm)"], clearance.inputs["True"]
+    )
+    minimum_feature = math_node(
+        group,
+        "Minimum Printable Feature",
+        "MULTIPLY",
+        group_in.outputs["Nozzle Diameter (mm)"],
+        3.0,
+    )
+    bumper = math_node(
+        group,
+        "Validated Bumper Thickness",
+        "MAXIMUM",
+        group_in.outputs["Bumper Thickness (mm)"],
+        minimum_feature,
+    )
+    prop_radius = math_node(group, "Propeller Radius", "DIVIDE", prop_mm, 2.0)
+    inner_radius = math_node(
+        group, "Inner Opening Radius", "ADD", prop_radius, clearance.outputs["Output"]
+    )
+    half_bumper = math_node(group, "Half Bumper", "DIVIDE", bumper, 2.0)
+    bumper_center_radius = math_node(
+        group, "Bumper Center Radius", "ADD", inner_radius, half_bumper
+    )
+    return {
+        "prop_mm": prop_mm,
+        "clearance": clearance.outputs["Output"],
+        "minimum_feature": minimum_feature,
+        "bumper": bumper,
+        "inner_radius": inner_radius,
+        "bumper_center_radius": bumper_center_radius,
+        "height": group_in.outputs["Guard Height (mm)"],
+        "strength": group_in.outputs["Strength / Weight"],
+    }
+
+
+def bumper_nodes(group, values):
+    nodes, links = group.nodes, group.links
+    circle = node(nodes, "GeometryNodeCurvePrimitiveCircle", "Bumper Centerline")
+    circle.mode = "RADIUS"
+    circle.inputs["Resolution"].default_value = 128
+    profile = node(nodes, "GeometryNodeCurvePrimitiveQuadrilateral", "Bumper Profile")
+    profile.mode = "RECTANGLE"
+    curve_to_mesh = node(nodes, "GeometryNodeCurveToMesh", "Solid Bumper")
+    transform = node(nodes, "GeometryNodeTransform", "Place Bumper")
+    links.new(values["bumper_center_radius"], circle.inputs["Radius"])
+    links.new(values["bumper"], profile.inputs["Width"])
+    links.new(values["height"], profile.inputs["Height"])
+    links.new(circle.outputs["Curve"], curve_to_mesh.inputs["Curve"])
+    links.new(profile.outputs["Curve"], curve_to_mesh.inputs["Profile Curve"])
+    links.new(curve_to_mesh.outputs["Mesh"], transform.inputs["Geometry"])
+    transform.inputs["Translation"].default_value = (*CENTER, 0.0)
+    return transform.outputs["Geometry"]
+
+
 def build_node_group():
     group = bpy.data.node_groups.get(GROUP_NAME)
     if group:
@@ -136,7 +225,12 @@ def build_node_group():
     separate.domain = "FACE"
     links.new(group_in.outputs["Geometry"], separate.inputs["Geometry"])
     links.new(keep.outputs["Attribute"], separate.inputs["Selection"])
-    links.new(separate.outputs["Selection"], group_out.inputs["Geometry"])
+    values = parameter_nodes(group, group_in)
+    bumper = bumper_nodes(group, values)
+    join = node(nodes, "GeometryNodeJoinGeometry", "Mount and Bumper")
+    links.new(separate.outputs["Selection"], join.inputs["Geometry"])
+    links.new(bumper, join.inputs["Geometry"])
+    links.new(join.outputs["Geometry"], group_out.inputs["Geometry"])
     return group
 
 
@@ -158,6 +252,36 @@ def install():
     obj = get_guard()
     build_source_attributes(obj)
     return install_modifier(obj)
+
+
+def parameter_socket(modifier, name):
+    return next(
+        item
+        for item in modifier.node_group.interface.items_tree
+        if item.item_type == "SOCKET" and item.in_out == "INPUT" and item.name == name
+    )
+
+
+def set_parameter(modifier, name, value):
+    socket = parameter_socket(modifier, name)
+    getattr(modifier.properties.inputs, socket.identifier).value = value
+    modifier.id_data.update_tag()
+
+
+def evaluated_vertices(obj):
+    evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    mesh = evaluated.to_mesh()
+    try:
+        return tuple(tuple(vertex.co) for vertex in mesh.vertices)
+    finally:
+        evaluated.to_mesh_clear()
+
+
+def dimensions(vertices):
+    return tuple(
+        max(co[axis] for co in vertices) - min(co[axis] for co in vertices)
+        for axis in range(3)
+    )
 
 
 def self_check():
@@ -201,6 +325,19 @@ def self_check():
         and item.socket_type == "NodeSocketFloat"
     }
     assert set(inputs) == set(PARAMETERS)
+    for name, value in (
+        ("Propeller Diameter (in)", 2.0),
+        ("Guard Height (mm)", 12.0),
+        ("Bumper Thickness (mm)", 3.2),
+        ("Strength / Weight", 0.5),
+        ("Nozzle Diameter (mm)", 0.4),
+        ("Safety Clearance Override (mm)", 0.0),
+    ):
+        set_parameter(modifier, name, value)
+    bpy.context.view_layer.update()
+    measured = dimensions(evaluated_vertices(obj))
+    assert abs(max(measured[:2]) - 61.264) <= 0.05, measured
+    assert abs(measured[2] - 12.0) <= 0.05, measured
 
 
 if __name__ == "__main__":
