@@ -15,7 +15,7 @@ PARAMETERS = {
     "Bumper Thickness (mm)": (1.2, 8.0, 3.2),
     "Strength / Weight": (0.0, 1.0, 0.5),
     "Nozzle Diameter (mm)": (0.4, 0.8, 0.4),
-    "Safety Clearance Override (mm)": (0.0, 20.0, 0.0),
+    "Safety Clearance Override (mm)": (0.0, 1_000_000.0, 0.0),
 }
 
 
@@ -60,7 +60,7 @@ def sizing(prop_inches, height, bumper, strength, nozzle, clearance_override=0.0
         "outer_diameter": 2.0 * (inner_radius + bumper),
         "primary_width": primary_width,
         "fork_width": fork_width,
-        "root_radius": 12.0,
+        "root_radius": 10.5,
         "fork_radius": max(16.0, inner_radius * 0.68),
         "fork_angle": math.radians(18.0),
     }
@@ -198,6 +198,204 @@ def bumper_nodes(group, values):
     return transform.outputs["Geometry"]
 
 
+def combine_xyz(group, name, x=0.0, y=0.0, z=0.0):
+    result = node(group.nodes, "ShaderNodeCombineXYZ", name)
+    _set_or_link(group.links, result.inputs["X"], x)
+    _set_or_link(group.links, result.inputs["Y"], y)
+    _set_or_link(group.links, result.inputs["Z"], z)
+    return result.outputs["Vector"]
+
+
+def bezier_segment(group, name, start, start_handle, end_handle, end):
+    result = node(group.nodes, "GeometryNodeCurvePrimitiveBezierSegment", name)
+    result.mode = "POSITION"
+    result.inputs["Resolution"].default_value = 12
+    for socket, value in (
+        ("Start", start),
+        ("Start Handle", start_handle),
+        ("End Handle", end_handle),
+        ("End", end),
+    ):
+        _set_or_link(group.links, result.inputs[socket], value)
+    return result.outputs["Curve"]
+
+
+def sampled_branch(group, name, curve_socket, width_socket, height_socket, start_scale, end_scale):
+    nodes, links = group.nodes, group.links
+    points = node(nodes, "GeometryNodeCurveToPoints", f"{name} Samples")
+    points.mode = "COUNT"
+    points.inputs["Count"].default_value = 14
+    cylinder = node(nodes, "GeometryNodeMeshCylinder", f"{name} Section")
+    cylinder.inputs["Vertices"].default_value = 24
+    cylinder.inputs["Side Segments"].default_value = 1
+    cylinder.inputs["Fill Segments"].default_value = 1
+    radius = math_node(group, f"{name} Half Width", "DIVIDE", width_socket, 2.0)
+    links.new(radius, cylinder.inputs["Radius"])
+    links.new(height_socket, cylinder.inputs["Depth"])
+    factor = node(nodes, "GeometryNodeSplineParameter", f"{name} Factor")
+    taper = node(nodes, "ShaderNodeMapRange", f"{name} Taper")
+    taper.clamp = True
+    taper.inputs["From Min"].default_value = 0.0
+    taper.inputs["From Max"].default_value = 1.0
+    taper.inputs["To Min"].default_value = start_scale
+    taper.inputs["To Max"].default_value = end_scale
+    links.new(factor.outputs["Factor"], taper.inputs["Value"])
+    scale = combine_xyz(group, f"{name} XY Taper", taper.outputs["Result"], taper.outputs["Result"], 1.0)
+    instances = node(nodes, "GeometryNodeInstanceOnPoints", f"{name} Cylinders")
+    realize = node(nodes, "GeometryNodeRealizeInstances", name)
+    links.new(curve_socket, points.inputs["Curve"])
+    links.new(points.outputs["Points"], instances.inputs["Points"])
+    links.new(cylinder.outputs["Mesh"], instances.inputs["Instance"])
+    links.new(scale, instances.inputs["Scale"])
+    links.new(instances.outputs["Instances"], realize.inputs["Geometry"])
+    return realize.outputs["Geometry"]
+
+
+def arm_nodes(group, values):
+    nodes, links = group.nodes, group.links
+    strength_factor = math_node(group, "Primary Strength Factor", "MULTIPLY", values["strength"], 0.25)
+    strength_factor = math_node(group, "Primary Width Factor", "ADD", strength_factor, 0.55)
+    primary_width = math_node(
+        group,
+        "Primary Width",
+        "MAXIMUM",
+        values["minimum_feature"],
+        math_node(group, "Scaled Primary Width", "MULTIPLY", values["bumper"], strength_factor),
+    )
+    fork_factor = math_node(group, "Fork Strength Factor", "MULTIPLY", values["strength"], 0.15)
+    fork_factor = math_node(group, "Fork Width Factor", "ADD", fork_factor, 0.65)
+    fork_width = math_node(
+        group,
+        "Fork Width",
+        "MAXIMUM",
+        values["minimum_feature"],
+        math_node(group, "Scaled Fork Width", "MULTIPLY", primary_width, fork_factor),
+    )
+    fork_radius = math_node(
+        group,
+        "Fork Radius",
+        "MAXIMUM",
+        math_node(group, "Scaled Fork Radius", "MULTIPLY", values["inner_radius"], 0.68),
+        16.0,
+    )
+    primary_end_handle_x = math_node(
+        group, "Primary End Handle X", "MULTIPLY", fork_radius, 0.80
+    )
+    primary_curve = bezier_segment(
+        group,
+        "Primary Arm Curve",
+        (10.5, 0.0, 0.0),
+        (13.0, 0.0, 0.0),
+        combine_xyz(group, "Primary End Handle", primary_end_handle_x, 0.0, 0.0),
+        combine_xyz(group, "Primary Fork Point", fork_radius, 0.0, 0.0),
+    )
+    primary = sampled_branch(
+        group, "Primary Arm", primary_curve, primary_width, values["height"], 1.25, 1.0
+    )
+
+    cos_angle = math.cos(math.radians(18.0))
+    sin_angle = math.sin(math.radians(18.0))
+    end_x = math_node(group, "Fork End X", "MULTIPLY", values["inner_radius"], cos_angle)
+    end_y = math_node(group, "Fork End Y", "MULTIPLY", values["inner_radius"], sin_angle)
+    delta_x = math_node(group, "Fork Delta X", "SUBTRACT", end_x, fork_radius)
+    handle1_x = math_node(
+        group,
+        "Fork Start Handle X",
+        "ADD",
+        fork_radius,
+        math_node(group, "Quarter Fork X", "MULTIPLY", delta_x, 0.25),
+    )
+    handle2_x = math_node(
+        group,
+        "Fork End Handle X",
+        "ADD",
+        fork_radius,
+        math_node(group, "Three Quarter Fork X", "MULTIPLY", delta_x, 0.75),
+    )
+    handle1_y = math_node(group, "Quarter Fork Y", "MULTIPLY", end_y, 0.25)
+    handle2_y = math_node(group, "Three Quarter Fork Y", "MULTIPLY", end_y, 0.85)
+    negative_end_y = math_node(group, "Negative Fork End Y", "MULTIPLY", end_y, -1.0)
+    negative_handle1_y = math_node(group, "Negative Quarter Fork Y", "MULTIPLY", handle1_y, -1.0)
+    negative_handle2_y = math_node(group, "Negative Three Quarter Fork Y", "MULTIPLY", handle2_y, -1.0)
+    start = combine_xyz(group, "Fork Start", fork_radius, 0.0, 0.0)
+    upper_curve = bezier_segment(
+        group,
+        "Upper Fork Curve",
+        start,
+        combine_xyz(group, "Upper Fork Start Handle", handle1_x, handle1_y, 0.0),
+        combine_xyz(group, "Upper Fork End Handle", handle2_x, handle2_y, 0.0),
+        combine_xyz(group, "Upper Fork End", end_x, end_y, 0.0),
+    )
+    lower_curve = bezier_segment(
+        group,
+        "Lower Fork Curve",
+        start,
+        combine_xyz(group, "Lower Fork Start Handle", handle1_x, negative_handle1_y, 0.0),
+        combine_xyz(group, "Lower Fork End Handle", handle2_x, negative_handle2_y, 0.0),
+        combine_xyz(group, "Lower Fork End", end_x, negative_end_y, 0.0),
+    )
+    upper = sampled_branch(
+        group, "Upper Fork", upper_curve, fork_width, values["height"], 1.0, 1.2
+    )
+    lower = sampled_branch(
+        group, "Lower Fork", lower_curve, fork_width, values["height"], 1.0, 1.2
+    )
+    local = node(nodes, "GeometryNodeJoinGeometry", "Local Y Arm")
+    for geometry in (primary, upper, lower):
+        links.new(geometry, local.inputs["Geometry"])
+
+    points = node(nodes, "GeometryNodeMeshLine", "Three Arm Points")
+    points.mode = "OFFSET"
+    points.inputs["Count"].default_value = 3
+    points.inputs["Start Location"].default_value = (0.0, 0.0, 0.0)
+    points.inputs["Offset"].default_value = (0.0, 0.0, 0.0)
+    index = node(nodes, "GeometryNodeInputIndex", "Arm Index")
+    rotation_z = math_node(group, "Arm Rotation", "MULTIPLY", index.outputs["Index"], 2.0 * math.pi / 3.0)
+    rotation = combine_xyz(group, "Arm Rotation Vector", 0.0, 0.0, rotation_z)
+    instances = node(nodes, "GeometryNodeInstanceOnPoints", "Threefold Arm Instances")
+    realize = node(nodes, "GeometryNodeRealizeInstances", "Realize Arm Network")
+    place = node(nodes, "GeometryNodeTransform", "Place Arm Network")
+    links.new(points.outputs["Mesh"], instances.inputs["Points"])
+    links.new(local.outputs["Geometry"], instances.inputs["Instance"])
+    links.new(rotation, instances.inputs["Rotation"])
+    links.new(instances.outputs["Instances"], realize.inputs["Geometry"])
+    links.new(realize.outputs["Geometry"], place.inputs["Geometry"])
+    place.inputs["Translation"].default_value = (*CENTER, 0.0)
+    return place.outputs["Geometry"]
+
+
+def union_node(group, name, first, second):
+    result = node(group.nodes, "GeometryNodeMeshBoolean", name)
+    result.operation = "UNION"
+    result.solver = "EXACT"
+    result.inputs["Self Intersection"].default_value = True
+    result.inputs["Hole Tolerant"].default_value = True
+    group.links.new(first, result.inputs[1])
+    group.links.new(second, result.inputs[1])
+    return result.outputs["Mesh"]
+
+
+def closed_mount_nodes(group, source_geometry):
+    nodes, links = group.nodes, group.links
+    cutter = node(nodes, "GeometryNodeMeshCylinder", "Mount Interface Cutter")
+    cutter.inputs["Vertices"].default_value = 128
+    cutter.inputs["Side Segments"].default_value = 1
+    cutter.inputs["Fill Segments"].default_value = 1
+    cutter.inputs["Radius"].default_value = MOUNT_KEEP_RADIUS
+    cutter.inputs["Depth"].default_value = 200.0
+    place = node(nodes, "GeometryNodeTransform", "Place Mount Cutter")
+    place.inputs["Translation"].default_value = (*CENTER, 0.0)
+    links.new(cutter.outputs["Mesh"], place.inputs["Geometry"])
+    clipped = node(nodes, "GeometryNodeMeshBoolean", "Clip Closed Mount")
+    clipped.operation = "INTERSECT"
+    clipped.solver = "EXACT"
+    clipped.inputs["Self Intersection"].default_value = True
+    clipped.inputs["Hole Tolerant"].default_value = True
+    links.new(source_geometry, clipped.inputs[1])
+    links.new(place.outputs["Geometry"], clipped.inputs[1])
+    return clipped.outputs["Mesh"]
+
+
 def build_node_group():
     group = bpy.data.node_groups.get(GROUP_NAME)
     if group:
@@ -227,10 +425,11 @@ def build_node_group():
     links.new(keep.outputs["Attribute"], separate.inputs["Selection"])
     values = parameter_nodes(group, group_in)
     bumper = bumper_nodes(group, values)
-    join = node(nodes, "GeometryNodeJoinGeometry", "Mount and Bumper")
-    links.new(separate.outputs["Selection"], join.inputs["Geometry"])
-    links.new(bumper, join.inputs["Geometry"])
-    links.new(join.outputs["Geometry"], group_out.inputs["Geometry"])
+    arms = arm_nodes(group, values)
+    body = union_node(group, "Union Bumper and Arms", bumper, arms)
+    closed_mount = closed_mount_nodes(group, group_in.outputs["Geometry"])
+    final = union_node(group, "Union V2 Body", body, closed_mount)
+    links.new(final, group_out.inputs["Geometry"])
     return group
 
 
@@ -325,6 +524,25 @@ def self_check():
         and item.socket_type == "NodeSocketFloat"
     }
     assert set(inputs) == set(PARAMETERS)
+    for name, (minimum, maximum, default) in PARAMETERS.items():
+        socket = inputs[name]
+        assert all(
+            math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-6)
+            for actual, expected in zip(
+                (socket.min_value, socket.max_value, socket.default_value),
+                (minimum, maximum, default),
+            )
+        ), name
+    assert {"PG_V2_MountKeep", "Keep Fixed Mount", "Union V2 Body"} <= {
+        item.name for item in group.nodes
+    }
+    assert {
+        "Primary Arm",
+        "Upper Fork",
+        "Lower Fork",
+        "Threefold Arm Instances",
+        "Union V2 Body",
+    } <= {item.name for item in group.nodes}, "Missing biomimetic arm network"
     for name, value in (
         ("Propeller Diameter (in)", 2.0),
         ("Guard Height (mm)", 12.0),
@@ -335,9 +553,12 @@ def self_check():
     ):
         set_parameter(modifier, name, value)
     bpy.context.view_layer.update()
-    measured = dimensions(evaluated_vertices(obj))
+    evaluated = evaluated_vertices(obj)
+    measured = dimensions(evaluated)
     assert abs(max(measured[:2]) - 61.264) <= 0.05, measured
     assert abs(measured[2] - 12.0) <= 0.05, measured
+    evaluated_coordinates = set(evaluated)
+    assert {coordinate for _index, coordinate in mount_signature(obj)} <= evaluated_coordinates
 
 
 if __name__ == "__main__":
