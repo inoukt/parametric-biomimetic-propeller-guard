@@ -25,6 +25,18 @@ A configurable open-arc propeller guard for 2–5 inch quadcopter propellers, de
 
 Your current 1505 layout is `Motor Example Preset = 2`, or `Motor Example Preset = 0` with `Motor Mount Pattern = 1`.
 
+## Size gallery
+
+All images use the 1505 diameter-12-mm motor layout and balanced guard settings.
+
+| 2 inch | 2.5 inch |
+|---|---|
+| ![2-inch propeller guard](screenshots/guard-2-inch.png) | ![2.5-inch propeller guard](screenshots/guard-2-5-inch.png) |
+| **3 inch** | **3.5 inch** |
+| ![3-inch propeller guard](screenshots/guard-3-inch.png) | ![3.5-inch propeller guard](screenshots/guard-3-5-inch.png) |
+| **4 inch** | **5 inch** |
+| ![4-inch propeller guard](screenshots/guard-4-inch.png) | ![5-inch propeller guard](screenshots/guard-5-inch.png) |
+
 ## Documentation
 
 - [Usage guide](docs/USAGE.md)

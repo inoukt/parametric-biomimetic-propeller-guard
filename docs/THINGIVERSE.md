@@ -63,7 +63,8 @@ Created by **Inouk T.** — **inoukt1@gmail.com**. Please credit the creator and
 - `docs/PARAMETER_REFERENCE.md`.
 - `docs/PRINTING.md`.
 - `LICENSE.md`.
-- Preview images: top view, underside/motor holes, modifier controls, and one printed prototype.
+- Size renders from `screenshots/`: `guard-2-inch.png`, `guard-2-5-inch.png`, `guard-3-inch.png`, `guard-3-5-inch.png`, `guard-4-inch.png`, and `guard-5-inch.png`.
+- Additional recommended photos: underside/motor holes, modifier controls, and one printed prototype.
 - Optional convenience STLs exported from the verified source for the prop sizes and motor layouts you physically tested.
 
 Do not label an STL as tested unless its motor fit, propeller clearance, and slice preview were actually checked.
