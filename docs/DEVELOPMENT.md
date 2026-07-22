@@ -4,7 +4,7 @@ Creator and maintainer: **Inouk T.** — inoukt1@gmail.com
 
 ## Source of truth
 
-The generator is `scripts/biomimetic_prop_guard_v2.py`. It rebuilds the Geometry Nodes group `PG_BiomimeticGuardV2` on `halfApexPropGuardModify.001`. The saved Blender artifact is `C:\Users\inouk\OneDrive\Documents\Untitled.blend` in the creator's working environment.
+The generator is `scripts/biomimetic_prop_guard_v2.py`. It rebuilds the Geometry Nodes group `PG_BiomimeticGuardV2` on `halfApexPropGuardModify.001`. The public Blender artifact is `Parametric_Biomimetic_Propeller_Guard.blend`.
 
 The project uses Blender Python, Geometry Nodes, `bmesh`, and the Python standard library. It has no third-party Python dependency.
 

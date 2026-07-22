@@ -16,7 +16,7 @@ A configurable open-arc propeller guard for 2–5 inch quadcopter propellers, de
 
 ## Quick start
 
-1. Open the supplied `.blend` file.
+1. Open `Parametric_Biomimetic_Propeller_Guard.blend`.
 2. Select `halfApexPropGuardModify.001`.
 3. Open the Geometry Nodes modifier named `PG Biomimetic Guard V2`.
 4. Choose the propeller diameter and motor mount before changing strength or print-speed options.

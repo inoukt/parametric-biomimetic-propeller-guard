@@ -57,7 +57,7 @@ Created by **Inouk T.** — **inoukt1@gmail.com**. Please credit the creator and
 
 ## Files to upload
 
-- The verified `.blend` source.
+- `Parametric_Biomimetic_Propeller_Guard.blend`.
 - `README.md`.
 - `docs/USAGE.md`.
 - `docs/PARAMETER_REFERENCE.md`.

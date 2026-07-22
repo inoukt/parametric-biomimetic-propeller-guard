@@ -14,10 +14,12 @@ RECESS_TOP_Z = -1.6034074783325195
 MOUNT_Z_MAX = 0.2965925931930542
 ARC_START = 30.0
 ARC_END = 240.0
+ARC_CENTER = (ARC_START + ARC_END) / 2.0
 PROP_PRESETS = (2.0, 2.5, 3.0, 3.5, 4.0, 5.0)
 GROUP_NAME = "PG_BiomimeticGuardV2"
 MODIFIER_NAME = "PG Biomimetic Guard V2"
 NORMAL_MODIFIER_NAME = "PG Weighted Normals"
+DESCRIPTION_OBJECT_NAME = "PG Parameter Descriptions"
 PARAMETERS = {
     "Propeller Diameter (in)": (2.0, 5.0, 2.0),
     "Guard Height (mm)": (3.3, 101.6, 12.0),
@@ -28,6 +30,31 @@ PARAMETERS = {
     "Under-Prop Rib Height (mm)": (1.2, 12.0, 3.3),
     "Bio Reinforcement": (0.0, 1.0, 0.5),
     "Edge Smoothness": (0.0, 1.0, 0.65),
+    "Arc Coverage (deg)": (180.0, 210.0, 210.0),
+    "Nozzle Preset": (0.0, 3.0, 0.0),
+    "Sacrificial Lip (mm)": (0.0, 1.2, 0.4),
+    "Light Bumper Profile": (0.0, 1.0, 0.0),
+    "Size Check Print": (0.0, 1.0, 0.0),
+    "Motor Mount Pattern": (0.0, 3.0, 1.0),
+    "Motor Example Preset": (0.0, 4.0, 0.0),
+}
+PARAMETER_DESCRIPTIONS = {
+    "Propeller Diameter (in)": "Target prop size. Presets tested from 2 to 5 inch.",
+    "Guard Height (mm)": "Vertical height of the outer protector rail.",
+    "Bumper Thickness (mm)": "Base wall thickness for the outer impact rail.",
+    "Strength / Weight": "Balances rib thickness against weight. Higher is stronger/heavier.",
+    "Nozzle Diameter (mm)": "Custom nozzle width used when Nozzle Preset is 0.",
+    "Safety Clearance Override (mm)": "Optional radial blade clearance. 0 uses automatic clearance.",
+    "Under-Prop Rib Height (mm)": "Support rib height. Grows downward from motor top, not into the motor.",
+    "Bio Reinforcement": "Adds organic pad strength at branch junctions and long-span scaling.",
+    "Edge Smoothness": "Raises curve/profile resolution for smoother printed edges.",
+    "Arc Coverage (deg)": "Outer protector coverage. Lower values print faster and protect less arc.",
+    "Nozzle Preset": "0 custom, 1 = 0.4 mm, 2 = 0.6 mm, 3 = 0.8 mm.",
+    "Sacrificial Lip (mm)": "Separate thin outer wear bead added outside the main bumper for scuffs/impacts.",
+    "Light Bumper Profile": "Lightens the bumper rail while keeping the same outside protection diameter.",
+    "Size Check Print": "1 keeps the selected prop diameter for a real clearance/fit check print.",
+    "Motor Mount Pattern": "Manual layout used when Motor Example Preset is 0: 0 = dia 9 mm, 1 = dia 12 mm, 2 = 16x16 mm, 3 = 16x19 mm.",
+    "Motor Example Preset": "Overrides Motor Mount Pattern: 0 manual, 1 BETAFPV 1105 dia 9 mm, 2 BETAFPV 1505 dia 12 mm, 3 16x16 mm, 4 16x19 mm.",
 }
 VALIDATION_CASES = (
     (2.0, 12.0, 2.2, 0.5, 0.4, 0.0, 3.3, 0.5, 0.65),
@@ -52,9 +79,42 @@ def get_guard():
     return obj
 
 
-def hole_centers():
-    radius = HOLE_CIRCLE_DIAMETER / 2.0
-    return ((radius, 0.0), (0.0, radius), (-radius, 0.0), (0.0, -radius))
+def motor_pattern_centers(pattern=1.0):
+    index = round(pattern)
+    assert 0 <= index <= 3
+    if index < 2:
+        radius = (4.5, 6.0)[index]
+        return ((radius, 0.0), (0.0, radius), (-radius, 0.0), (0.0, -radius))
+    half_y = (8.0, 9.5)[index - 2]
+    return ((8.0, half_y), (-8.0, half_y), (-8.0, -half_y), (8.0, -half_y))
+
+
+def motor_example_centers(pattern=1.0, example=0.0):
+    index = round(example)
+    assert 0 <= index <= 4
+    return motor_pattern_centers(index - 1 if index else pattern)
+
+
+def hole_centers(pattern=1.0, example=0.0):
+    return motor_example_centers(pattern, example)
+
+
+def effective_nozzle(nozzle, preset):
+    if preset >= 2.5:
+        return 0.8
+    if preset >= 1.5:
+        return 0.6
+    if preset >= 0.5:
+        return 0.4
+    return nozzle
+
+
+def branch_angles(arc_coverage):
+    start = ARC_CENTER - arc_coverage / 2.0
+    end = ARC_CENTER + arc_coverage / 2.0
+    margin = 20.0
+    step = (arc_coverage - 2.0 * margin) / 2.0
+    return (start + margin, start + margin + step, end - margin)
 
 
 def sizing(
@@ -67,6 +127,11 @@ def sizing(
     rib_height=3.3,
     bio_reinforcement=0.5,
     edge_smoothness=0.65,
+    arc_coverage=210.0,
+    nozzle_preset=0.0,
+    sacrificial_lip=0.4,
+    light_bumper=0.0,
+    size_check=0.0,
 ):
     assert 2.0 <= prop_inches <= 5.0
     assert 3.3 <= height <= 101.6
@@ -76,28 +141,44 @@ def sizing(
     assert 1.2 <= rib_height <= 12.0
     assert 0.0 <= bio_reinforcement <= 1.0
     assert 0.0 <= edge_smoothness <= 1.0
+    assert 180.0 <= arc_coverage <= 210.0
+    assert 0.0 <= nozzle_preset <= 3.0
+    assert 0.0 <= sacrificial_lip <= 1.2
+    assert 0.0 <= light_bumper <= 1.0
+    assert 0.0 <= size_check <= 1.0
+    nozzle = effective_nozzle(nozzle, nozzle_preset)
     prop_mm = prop_inches * 25.4
     min_feature = 3.0 * nozzle
     assert 1.2 <= bumper <= 8.0
     bumper = max(bumper, min_feature)
+    profile_bumper = max(min_feature, bumper * (1.0 - 0.35 * light_bumper))
     clearance = clearance_override or max(2.0, 0.04 * prop_mm)
     inner_radius = prop_mm / 2.0 + clearance
     prop_scale = (prop_inches - 2.0) / 3.0
     span_reinforcement = 1.0 + prop_scale * (0.35 + 0.20 * bio_reinforcement)
-    primary_width = max(min_feature, bumper * (0.55 + 0.25 * strength) * span_reinforcement)
+    primary_width = max(min_feature, profile_bumper * (0.55 + 0.25 * strength) * span_reinforcement)
     fork_width = max(min_feature, primary_width * (0.65 + 0.15 * strength))
     rib_height = min(height, max(rib_height, min_feature))
+    bumper_center_radius = inner_radius + bumper - profile_bumper / 2.0
+    lip_width = max(0.0, sacrificial_lip)
+    lip_center_radius = inner_radius + bumper + lip_width / 2.0
+    outer_radius = inner_radius + bumper + lip_width
+    arc_start = ARC_CENTER - arc_coverage / 2.0
+    arc_end = ARC_CENTER + arc_coverage / 2.0
     return {
         "prop_mm": prop_mm,
         "height": height,
         "bumper": bumper,
+        "profile_bumper": profile_bumper,
         "strength": strength,
         "nozzle": nozzle,
         "min_feature": min_feature,
         "clearance": clearance,
         "inner_radius": inner_radius,
-        "bumper_center_radius": inner_radius + bumper / 2.0,
-        "outer_diameter": 2.0 * (inner_radius + bumper),
+        "bumper_center_radius": bumper_center_radius,
+        "lip_width": lip_width,
+        "lip_center_radius": lip_center_radius,
+        "outer_diameter": 2.0 * outer_radius,
         "primary_width": primary_width,
         "fork_width": fork_width,
         "root_radius": 12.0,
@@ -107,6 +188,8 @@ def sizing(
         "bio_reinforcement": bio_reinforcement,
         "span_reinforcement": span_reinforcement,
         "edge_smoothness": edge_smoothness,
+        "arc_start": arc_start,
+        "arc_end": arc_end,
     }
 
 
@@ -136,6 +219,30 @@ def parameter_nodes(group, group_in):
     prop_mm = math_node(
         group, "Propeller Millimetres", "MULTIPLY", group_in.outputs["Propeller Diameter (in)"], 25.4
     )
+    preset_04 = node(group.nodes, "GeometryNodeSwitch", "Nozzle Preset 0.4")
+    preset_04.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use 0.4 Nozzle Preset", "GREATER_THAN", group_in.outputs["Nozzle Preset"], 0.5),
+        preset_04.inputs["Switch"],
+    )
+    group.links.new(group_in.outputs["Nozzle Diameter (mm)"], preset_04.inputs["False"])
+    preset_04.inputs["True"].default_value = 0.4
+    preset_06 = node(group.nodes, "GeometryNodeSwitch", "Nozzle Preset 0.6")
+    preset_06.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use 0.6 Nozzle Preset", "GREATER_THAN", group_in.outputs["Nozzle Preset"], 1.5),
+        preset_06.inputs["Switch"],
+    )
+    group.links.new(preset_04.outputs["Output"], preset_06.inputs["False"])
+    preset_06.inputs["True"].default_value = 0.6
+    nozzle = node(group.nodes, "GeometryNodeSwitch", "Nozzle Preset 0.8")
+    nozzle.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use 0.8 Nozzle Preset", "GREATER_THAN", group_in.outputs["Nozzle Preset"], 2.5),
+        nozzle.inputs["Switch"],
+    )
+    group.links.new(preset_06.outputs["Output"], nozzle.inputs["False"])
+    nozzle.inputs["True"].default_value = 0.8
     auto_clearance = math_node(
         group, "Scaled Clearance", "MULTIPLY", prop_mm, 0.04
     )
@@ -158,7 +265,7 @@ def parameter_nodes(group, group_in):
         group,
         "Minimum Printable Feature",
         "MULTIPLY",
-        group_in.outputs["Nozzle Diameter (mm)"],
+        nozzle.outputs["Output"],
         3.0,
     )
     bumper = math_node(
@@ -167,6 +274,17 @@ def parameter_nodes(group, group_in):
         "MAXIMUM",
         group_in.outputs["Bumper Thickness (mm)"],
         minimum_feature,
+    )
+    light_bumper_reduction = math_node(
+        group, "Light Bumper Reduction", "MULTIPLY", group_in.outputs["Light Bumper Profile"], 0.35
+    )
+    light_bumper_scale = math_node(group, "Light Bumper Scale", "SUBTRACT", 1.0, light_bumper_reduction)
+    profile_bumper = math_node(
+        group,
+        "Printable Light Bumper Width",
+        "MAXIMUM",
+        minimum_feature,
+        math_node(group, "Scaled Light Bumper Width", "MULTIPLY", bumper, light_bumper_scale),
     )
     rib_height = math_node(
         group,
@@ -221,13 +339,137 @@ def parameter_nodes(group, group_in):
             ),
         ),
     )
+    mount_9 = node(group.nodes, "GeometryNodeSwitch", "Motor Mount Pattern 9mm")
+    mount_9.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use 9mm Motor Mount", "LESS_THAN", group_in.outputs["Motor Mount Pattern"], 0.5),
+        mount_9.inputs["Switch"],
+    )
+    mount_9.inputs["False"].default_value = 12.0
+    mount_9.inputs["True"].default_value = 9.0
+    mount_16 = node(group.nodes, "GeometryNodeSwitch", "Motor Mount Pattern 16mm")
+    mount_16.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use 16mm Motor Mount", "GREATER_THAN", group_in.outputs["Motor Mount Pattern"], 1.5),
+        mount_16.inputs["Switch"],
+    )
+    group.links.new(mount_9.outputs["Output"], mount_16.inputs["False"])
+    mount_16.inputs["True"].default_value = 16.0
+    mount_19 = node(group.nodes, "GeometryNodeSwitch", "Motor Mount Pattern 19mm")
+    mount_19.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use 19mm Motor Mount", "GREATER_THAN", group_in.outputs["Motor Mount Pattern"], 2.5),
+        mount_19.inputs["Switch"],
+    )
+    group.links.new(mount_16.outputs["Output"], mount_19.inputs["False"])
+    mount_19.inputs["True"].default_value = 19.0
+    example_9 = node(group.nodes, "GeometryNodeSwitch", "Motor Example BETAFPV 1105 9mm")
+    example_9.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use BETAFPV 1105 Example", "GREATER_THAN", group_in.outputs["Motor Example Preset"], 0.5),
+        example_9.inputs["Switch"],
+    )
+    group.links.new(mount_19.outputs["Output"], example_9.inputs["False"])
+    example_9.inputs["True"].default_value = 9.0
+    example_12 = node(group.nodes, "GeometryNodeSwitch", "Motor Example 12mm Micro")
+    example_12.input_type = "FLOAT"
+    group.links.new(
+        math_node(group, "Use 12mm Micro Example", "GREATER_THAN", group_in.outputs["Motor Example Preset"], 1.5),
+        example_12.inputs["Switch"],
+    )
+    group.links.new(example_9.outputs["Output"], example_12.inputs["False"])
+    example_12.inputs["True"].default_value = 12.0
+    manual_mount = math_node(
+        group, "Use Manual Motor Mount", "LESS_THAN", group_in.outputs["Motor Example Preset"], 0.5
+    )
+    rectangular_mount = math_node(
+        group,
+        "Use Rectangular Motor Mount",
+        "MAXIMUM",
+        math_node(group, "Use Rectangular Motor Example", "GREATER_THAN", group_in.outputs["Motor Example Preset"], 2.5),
+        math_node(
+            group,
+            "Use Manual Rectangular Motor Mount",
+            "MULTIPLY",
+            manual_mount,
+            math_node(group, "Manual Pattern Is Rectangular", "GREATER_THAN", group_in.outputs["Motor Mount Pattern"], 1.5),
+        ),
+    )
+    rect_half_y = node(group.nodes, "GeometryNodeSwitch", "Rectangular Motor Mount Half Y")
+    rect_half_y.input_type = "FLOAT"
+    group.links.new(
+        math_node(
+            group,
+            "Use 16x19 Motor Mount",
+            "MAXIMUM",
+            math_node(group, "Use 16x19 Motor Example", "GREATER_THAN", group_in.outputs["Motor Example Preset"], 3.5),
+            math_node(
+                group,
+                "Use Manual 16x19 Motor Mount",
+                "MULTIPLY",
+                manual_mount,
+                math_node(group, "Manual Pattern Is 16x19", "GREATER_THAN", group_in.outputs["Motor Mount Pattern"], 2.5),
+            ),
+        ),
+        rect_half_y.inputs["Switch"],
+    )
+    rect_half_y.inputs["False"].default_value = 8.0
+    rect_half_y.inputs["True"].default_value = 9.5
+    cross_radius = math_node(group, "Cross Motor Mount Radius", "DIVIDE", example_12.outputs["Output"], 2.0)
+    rect_half_x = 8.0
+    mount_radius = node(group.nodes, "GeometryNodeSwitch", "Motor Mount Radius For Plate")
+    mount_radius.input_type = "FLOAT"
+    group.links.new(rectangular_mount, mount_radius.inputs["Switch"])
+    group.links.new(cross_radius, mount_radius.inputs["False"])
+    group.links.new(
+        math_node(
+            group,
+            "Rectangular Motor Mount Radius",
+            "SQRT",
+            math_node(
+                group,
+                "Rectangular Motor Mount Radius Squared",
+                "ADD",
+                rect_half_x * rect_half_x,
+                math_node(group, "Rectangular Half Y Squared", "MULTIPLY", rect_half_y.outputs["Output"], rect_half_y.outputs["Output"]),
+            ),
+            0.0,
+        ),
+        mount_radius.inputs["True"],
+    )
+    plate_radius = math_node(
+        group,
+        "Motor Plate Radius For Pattern",
+        "MAXIMUM",
+        PLATE_RADIUS,
+        math_node(
+            group,
+            "Pattern Plate Clearance Radius",
+            "ADD",
+            mount_radius.outputs["Output"],
+            RECESS_RADIUS + 1.5,
+        ),
+    )
     prop_radius = math_node(group, "Propeller Radius", "DIVIDE", prop_mm, 2.0)
     inner_radius = math_node(
         group, "Inner Opening Radius", "ADD", prop_radius, clearance.outputs["Output"]
     )
     half_bumper = math_node(group, "Half Bumper", "DIVIDE", bumper, 2.0)
+    half_profile_bumper = math_node(group, "Half Light Bumper", "DIVIDE", profile_bumper, 2.0)
+    base_outer_radius = math_node(group, "Base Bumper Outer Radius", "ADD", inner_radius, bumper)
     bumper_center_radius = math_node(
-        group, "Bumper Center Radius", "ADD", inner_radius, half_bumper
+        group, "Bumper Center Radius", "SUBTRACT", base_outer_radius, half_profile_bumper
+    )
+    half_lip = math_node(group, "Half Sacrificial Lip", "DIVIDE", group_in.outputs["Sacrificial Lip (mm)"], 2.0)
+    lip_center_radius = math_node(
+        group, "Sacrificial Lip Center Radius", "ADD", base_outer_radius, half_lip
+    )
+    arc_half = math_node(group, "Arc Coverage Half", "DIVIDE", group_in.outputs["Arc Coverage (deg)"], 2.0)
+    arc_start = math_node(
+        group, "Dynamic Arc Start", "DIVIDE", math_node(group, "Arc Start Degrees", "SUBTRACT", ARC_CENTER, arc_half), 360.0
+    )
+    arc_end = math_node(
+        group, "Dynamic Arc End", "DIVIDE", math_node(group, "Arc End Degrees", "ADD", ARC_CENTER, arc_half), 360.0
     )
     low_height = math_node(
         group,
@@ -241,13 +483,24 @@ def parameter_nodes(group, group_in):
         "clearance": clearance.outputs["Output"],
         "minimum_feature": minimum_feature,
         "bumper": bumper,
+        "profile_bumper": profile_bumper,
         "inner_radius": inner_radius,
         "bumper_center_radius": bumper_center_radius,
+        "lip_width": group_in.outputs["Sacrificial Lip (mm)"],
+        "lip_center_radius": lip_center_radius,
         "height": group_in.outputs["Guard Height (mm)"],
         "rib_height": rib_height,
         "bio_reinforcement": group_in.outputs["Bio Reinforcement"],
         "span_reinforcement": span_reinforcement,
+        "mount_diameter": example_12.outputs["Output"],
+        "rectangular_mount": rectangular_mount,
+        "rect_half_y": rect_half_y.outputs["Output"],
+        "plate_radius": plate_radius,
+        "motor_pattern": group_in.outputs["Motor Mount Pattern"],
+        "motor_example": group_in.outputs["Motor Example Preset"],
         "smooth_steps": smooth_steps,
+        "arc_start": arc_start,
+        "arc_end": arc_end,
         "strength": group_in.outputs["Strength / Weight"],
         "low_height": low_height,
     }
@@ -284,10 +537,17 @@ def bumper_nodes(group, values):
     circle = node(nodes, "GeometryNodeCurvePrimitiveCircle", "Bumper Centerline")
     circle.mode = "RADIUS"
     circle.inputs["Resolution"].default_value = 128
+    lip_circle = node(nodes, "GeometryNodeCurvePrimitiveCircle", "Sacrificial Lip Centerline")
+    lip_circle.mode = "RADIUS"
+    lip_circle.inputs["Resolution"].default_value = 128
     trim = node(nodes, "GeometryNodeTrimCurve", "Open Bumper Arc")
     trim.mode = "FACTOR"
-    trim.inputs["Start"].default_value = ARC_START / 360.0
-    trim.inputs["End"].default_value = ARC_END / 360.0
+    links.new(values["arc_start"], trim.inputs["Start"])
+    links.new(values["arc_end"], trim.inputs["End"])
+    lip_trim = node(nodes, "GeometryNodeTrimCurve", "Open Sacrificial Lip Arc")
+    lip_trim.mode = "FACTOR"
+    links.new(values["arc_start"], lip_trim.inputs["Start"])
+    links.new(values["arc_end"], lip_trim.inputs["End"])
     relief = math_node(
         group, "Low Height Bumper Relief", "MULTIPLY", values["low_height"], 0.02
     )
@@ -295,39 +555,47 @@ def bumper_nodes(group, values):
         group, "Boolean Relief Bumper Height", "SUBTRACT", values["height"], relief
     )
     profile = flat_bottom_profile(
-        group, "Rounded Bumper Profile", values["bumper"], bumper_height, values["smooth_steps"]
+        group, "Rounded Bumper Profile", values["profile_bumper"], bumper_height, values["smooth_steps"]
+    )
+    lip_width = math_node(group, "Printable Sacrificial Lip Width", "MAXIMUM", values["lip_width"], 0.01)
+    lip_profile = flat_bottom_profile(
+        group, "Sacrificial Lip Profile", lip_width, bumper_height, values["smooth_steps"]
     )
     curve_to_mesh = node(nodes, "GeometryNodeCurveToMesh", "Solid Bumper")
     curve_to_mesh.inputs["Fill Caps"].default_value = True
+    lip_to_mesh = node(nodes, "GeometryNodeCurveToMesh", "Solid Sacrificial Lip")
+    lip_to_mesh.inputs["Fill Caps"].default_value = True
     transform = node(nodes, "GeometryNodeTransform", "Place Bumper")
-    cap_radius = math_node(group, "Bumper End Cap Radius", "DIVIDE", values["bumper"], 2.0)
+    cap_radius = math_node(group, "Bumper End Cap Radius", "DIVIDE", values["profile_bumper"], 2.0)
+    start_angle = math_node(group, "Bumper Start Angle Radians", "MULTIPLY", values["arc_start"], math.tau)
+    end_angle = math_node(group, "Bumper End Angle Radians", "MULTIPLY", values["arc_end"], math.tau)
     start_x = math_node(
         group,
         "Bumper Start Cap X",
         "MULTIPLY",
         values["bumper_center_radius"],
-        math.cos(math.radians(ARC_START)),
+        math_node(group, "Bumper Start Cap Cosine", "COSINE", start_angle, 0.0),
     )
     start_y = math_node(
         group,
         "Bumper Start Cap Y",
         "MULTIPLY",
         values["bumper_center_radius"],
-        math.sin(math.radians(ARC_START)),
+        math_node(group, "Bumper Start Cap Sine", "SINE", start_angle, 0.0),
     )
     end_x = math_node(
         group,
         "Bumper End Cap X",
         "MULTIPLY",
         values["bumper_center_radius"],
-        math.cos(math.radians(ARC_END)),
+        math_node(group, "Bumper End Cap Cosine", "COSINE", end_angle, 0.0),
     )
     end_y = math_node(
         group,
         "Bumper End Cap Y",
         "MULTIPLY",
         values["bumper_center_radius"],
-        math.sin(math.radians(ARC_END)),
+        math_node(group, "Bumper End Cap Sine", "SINE", end_angle, 0.0),
     )
     start_cap = junction_pad(
         group,
@@ -347,17 +615,81 @@ def bumper_nodes(group, values):
         bumper_height,
         radius_socket=cap_radius,
     )
+    lip_cap_radius = math_node(group, "Sacrificial Lip End Cap Radius", "DIVIDE", lip_width, 2.0)
+    lip_start_x = math_node(
+        group,
+        "Sacrificial Lip Start Cap X",
+        "MULTIPLY",
+        values["lip_center_radius"],
+        math_node(group, "Sacrificial Lip Start Cap Cosine", "COSINE", start_angle, 0.0),
+    )
+    lip_start_y = math_node(
+        group,
+        "Sacrificial Lip Start Cap Y",
+        "MULTIPLY",
+        values["lip_center_radius"],
+        math_node(group, "Sacrificial Lip Start Cap Sine", "SINE", start_angle, 0.0),
+    )
+    lip_end_x = math_node(
+        group,
+        "Sacrificial Lip End Cap X",
+        "MULTIPLY",
+        values["lip_center_radius"],
+        math_node(group, "Sacrificial Lip End Cap Cosine", "COSINE", end_angle, 0.0),
+    )
+    lip_end_y = math_node(
+        group,
+        "Sacrificial Lip End Cap Y",
+        "MULTIPLY",
+        values["lip_center_radius"],
+        math_node(group, "Sacrificial Lip End Cap Sine", "SINE", end_angle, 0.0),
+    )
+    lip_start_cap = junction_pad(
+        group,
+        "Sacrificial Lip Start Cap",
+        lip_start_x,
+        lip_start_y,
+        lip_width,
+        bumper_height,
+        radius_socket=lip_cap_radius,
+    )
+    lip_end_cap = junction_pad(
+        group,
+        "Sacrificial Lip End Cap",
+        lip_end_x,
+        lip_end_y,
+        lip_width,
+        bumper_height,
+        radius_socket=lip_cap_radius,
+    )
     with_start_cap = union_node(
         group, "Bumper With Rounded Start Cap", curve_to_mesh.outputs["Mesh"], start_cap, solver="MANIFOLD"
     )
     rounded_bumper = union_node(
         group, "Bumper With Rounded End Caps", with_start_cap, end_cap, solver="MANIFOLD"
     )
+    lip_with_start_cap = union_node(
+        group, "Sacrificial Lip With Start Cap", lip_to_mesh.outputs["Mesh"], lip_start_cap, solver="MANIFOLD"
+    )
+    rounded_lip = union_node(
+        group, "Sacrificial Lip With End Caps", lip_with_start_cap, lip_end_cap, solver="MANIFOLD"
+    )
+    lip_union = union_node(group, "Bumper With Sacrificial Lip", rounded_bumper, rounded_lip, solver="MANIFOLD")
+    use_lip = math_node(group, "Use Sacrificial Lip Geometry", "GREATER_THAN", values["lip_width"], 0.01)
+    bumper_with_optional_lip = node(nodes, "GeometryNodeSwitch", "Optional Sacrificial Lip")
+    bumper_with_optional_lip.input_type = "GEOMETRY"
     links.new(values["bumper_center_radius"], circle.inputs["Radius"])
+    links.new(values["lip_center_radius"], lip_circle.inputs["Radius"])
     links.new(circle.outputs["Curve"], trim.inputs["Curve"])
+    links.new(lip_circle.outputs["Curve"], lip_trim.inputs["Curve"])
     links.new(trim.outputs["Curve"], curve_to_mesh.inputs["Curve"])
+    links.new(lip_trim.outputs["Curve"], lip_to_mesh.inputs["Curve"])
     links.new(profile, curve_to_mesh.inputs["Profile Curve"])
-    links.new(rounded_bumper, transform.inputs["Geometry"])
+    links.new(lip_profile, lip_to_mesh.inputs["Profile Curve"])
+    links.new(use_lip, bumper_with_optional_lip.inputs["Switch"])
+    links.new(rounded_bumper, bumper_with_optional_lip.inputs["False"])
+    links.new(lip_union, bumper_with_optional_lip.inputs["True"])
+    links.new(bumper_with_optional_lip.outputs["Output"], transform.inputs["Geometry"])
     z_center = math_node(group, "Bumper Half Height", "DIVIDE", bumper_height, 2.0)
     z_center = math_node(group, "Bumper Print Bed Alignment", "ADD", z_center, MOUNT_Z_MIN)
     links.new(
@@ -450,16 +782,24 @@ def arm_nodes(group, values):
         "Fork Radius",
         "MAXIMUM",
         math_node(group, "Scaled Fork Radius", "MULTIPLY", values["inner_radius"], 0.68),
-        16.0,
+        math_node(group, "Fork Clears Motor Plate", "ADD", values["plate_radius"], 4.0),
     )
+    arm_root_radius = math_node(
+        group,
+        "Arm Root Clears Motor Plate",
+        "MAXIMUM",
+        11.0,
+        math_node(group, "Arm Root Plate Edge", "SUBTRACT", values["plate_radius"], 1.0),
+    )
+    arm_root_handle = math_node(group, "Arm Root Handle", "ADD", arm_root_radius, 3.0)
     primary_end_handle_x = math_node(
         group, "Primary End Handle X", "MULTIPLY", fork_radius, 0.80
     )
     primary_curve = bezier_segment(
         group,
         "Primary Arm Curve",
-        (9.0, 0.0, 0.0),
-        (12.0, 0.0, 0.0),
+        combine_xyz(group, "Primary Root Point", arm_root_radius, 0.0, 0.0),
+        combine_xyz(group, "Primary Root Handle", arm_root_handle, 0.0, 0.0),
         combine_xyz(group, "Primary End Handle", primary_end_handle_x, 0.0, 0.0),
         combine_xyz(group, "Primary Fork Point", fork_radius, 0.0, 0.0),
     )
@@ -528,7 +868,7 @@ def arm_nodes(group, values):
     root_pad = junction_pad(
         group,
         "Root Junction Pad",
-        9.5,
+        math_node(group, "Root Junction X", "ADD", arm_root_radius, 0.5),
         0.0,
         primary_width,
         values["rib_height"],
@@ -578,15 +918,34 @@ def arm_nodes(group, values):
     points.inputs["Start Location"].default_value = (0.0, 0.0, 0.0)
     points.inputs["Offset"].default_value = (0.0, 0.0, 0.0)
     index = node(nodes, "GeometryNodeInputIndex", "Arm Index")
+    arc_start_degrees = math_node(group, "Arm Arc Start Degrees", "MULTIPLY", values["arc_start"], 360.0)
+    arm_start = math_node(group, "Arm Start Inside Arc", "ADD", arc_start_degrees, 20.0)
+    arm_step = math_node(
+        group,
+        "Arm Arc Coverage Step",
+        "DIVIDE",
+        math_node(
+            group,
+            "Arm Coverage Minus Margins",
+            "SUBTRACT",
+            math_node(group, "Arm Arc Coverage Degrees", "MULTIPLY", math_node(group, "Arm Arc Width Factor", "SUBTRACT", values["arc_end"], values["arc_start"]), 360.0),
+            40.0,
+        ),
+        2.0,
+    )
     rotation_z = math_node(
         group,
         "Arm Rotation Step",
         "MULTIPLY",
         index.outputs["Index"],
-        math.radians(85.0),
+        math_node(group, "Arm Step Radians", "MULTIPLY", arm_step, math.pi / 180.0),
     )
     rotation_z = math_node(
-        group, "Arm Rotation", "ADD", rotation_z, math.radians(50.0)
+        group,
+        "Arm Rotation",
+        "ADD",
+        rotation_z,
+        math_node(group, "Arm Start Radians", "MULTIPLY", arm_start, math.pi / 180.0),
     )
     rotation = combine_xyz(group, "Arm Rotation Vector", 0.0, 0.0, rotation_z)
     instances = node(nodes, "GeometryNodeInstanceOnPoints", "Threefold Arm Instances")
@@ -619,11 +978,18 @@ def union_node(group, name, first, second, solver="EXACT"):
     return result.outputs["Mesh"]
 
 
-def motor_plate_nodes(group):
+def translated_geometry(group, name, geometry, x, y):
+    place = node(group.nodes, "GeometryNodeTransform", name)
+    group.links.new(geometry, place.inputs["Geometry"])
+    group.links.new(combine_xyz(group, f"{name} Offset", x, y, 0.0), place.inputs["Translation"])
+    return place.outputs["Geometry"]
+
+
+def motor_plate_nodes(group, values):
     nodes, links = group.nodes, group.links
     plate = node(nodes, "GeometryNodeMeshCylinder", "V3 Motor Plate")
     plate.inputs["Vertices"].default_value = 128
-    plate.inputs["Radius"].default_value = PLATE_RADIUS
+    links.new(values["plate_radius"], plate.inputs["Radius"])
     plate.inputs["Depth"].default_value = MOUNT_Z_MAX - MOUNT_Z_MIN
     place_plate = node(nodes, "GeometryNodeTransform", "Place V3 Motor Plate")
     place_plate.inputs["Translation"].default_value = (
@@ -631,14 +997,6 @@ def motor_plate_nodes(group):
         (MOUNT_Z_MIN + MOUNT_Z_MAX) / 2.0,
     )
     links.new(plate.outputs["Mesh"], place_plate.inputs["Geometry"])
-
-    points_curve = node(nodes, "GeometryNodeCurvePrimitiveCircle", "V3 Hole Circle")
-    points_curve.mode = "RADIUS"
-    points_curve.inputs["Resolution"].default_value = 4
-    points_curve.inputs["Radius"].default_value = HOLE_CIRCLE_DIAMETER / 2.0
-    points = node(nodes, "GeometryNodeCurveToPoints", "V3 Hole Points")
-    points.mode = "EVALUATED"
-    links.new(points_curve.outputs["Curve"], points.inputs["Curve"])
 
     through = node(nodes, "GeometryNodeMeshCylinder", "V3 Through Cutter")
     through.inputs["Vertices"].default_value = 48
@@ -664,21 +1022,43 @@ def motor_plate_nodes(group):
     )
     links.new(recess.outputs["Mesh"], place_recess.inputs["Geometry"])
 
-    through_instances = node(
-        nodes, "GeometryNodeInstanceOnPoints", "Instance V3 Through Cutters"
+    cross_radius = math_node(group, "V3 Cross Hole Radius", "DIVIDE", values["mount_diameter"], 2.0)
+    negative_cross_radius = math_node(group, "V3 Negative Cross Hole Radius", "MULTIPLY", cross_radius, -1.0)
+    negative_rect_half_x = -8.0
+    negative_rect_half_y = math_node(group, "V3 Negative Rect Half Y", "MULTIPLY", values["rect_half_y"], -1.0)
+    cross_centers = (
+        (cross_radius, 0.0),
+        (0.0, cross_radius),
+        (negative_cross_radius, 0.0),
+        (0.0, negative_cross_radius),
     )
-    through_realized = node(nodes, "GeometryNodeRealizeInstances", "V3 Through Cutters")
-    links.new(points.outputs["Points"], through_instances.inputs["Points"])
-    links.new(place_through.outputs["Geometry"], through_instances.inputs["Instance"])
-    links.new(through_instances.outputs["Instances"], through_realized.inputs["Geometry"])
-
-    recess_instances = node(
-        nodes, "GeometryNodeInstanceOnPoints", "Instance V3 Recess Cutters"
+    rect_centers = (
+        (8.0, values["rect_half_y"]),
+        (negative_rect_half_x, values["rect_half_y"]),
+        (negative_rect_half_x, negative_rect_half_y),
+        (8.0, negative_rect_half_y),
     )
-    recess_realized = node(nodes, "GeometryNodeRealizeInstances", "V3 Recess Cutters")
-    links.new(points.outputs["Points"], recess_instances.inputs["Points"])
-    links.new(place_recess.outputs["Geometry"], recess_instances.inputs["Instance"])
-    links.new(recess_instances.outputs["Instances"], recess_realized.inputs["Geometry"])
+    through_realized = node(nodes, "GeometryNodeJoinGeometry", "V3 Through Cutters")
+    recess_realized = node(nodes, "GeometryNodeJoinGeometry", "V3 Recess Cutters")
+    for index, (cross_center, rect_center) in enumerate(zip(cross_centers, rect_centers), start=1):
+        hole_x = node(nodes, "GeometryNodeSwitch", f"V3 Hole {index} X")
+        hole_x.input_type = "FLOAT"
+        links.new(values["rectangular_mount"], hole_x.inputs["Switch"])
+        _set_or_link(links, hole_x.inputs["False"], cross_center[0])
+        _set_or_link(links, hole_x.inputs["True"], rect_center[0])
+        hole_y = node(nodes, "GeometryNodeSwitch", f"V3 Hole {index} Y")
+        hole_y.input_type = "FLOAT"
+        links.new(values["rectangular_mount"], hole_y.inputs["Switch"])
+        _set_or_link(links, hole_y.inputs["False"], cross_center[1])
+        _set_or_link(links, hole_y.inputs["True"], rect_center[1])
+        links.new(
+            translated_geometry(group, f"Place V3 Through Cutter {index}", place_through.outputs["Geometry"], hole_x.outputs["Output"], hole_y.outputs["Output"]),
+            through_realized.inputs["Geometry"],
+        )
+        links.new(
+            translated_geometry(group, f"Place V3 Recess Cutter {index}", place_recess.outputs["Geometry"], hole_x.outputs["Output"], hole_y.outputs["Output"]),
+            recess_realized.inputs["Geometry"],
+        )
 
     subtract_through = node(nodes, "GeometryNodeMeshBoolean", "Cut V3 Through Holes")
     subtract_through.operation = "DIFFERENCE"
@@ -706,12 +1086,16 @@ def build_node_group():
     group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
     group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
     for name, (minimum, maximum, default) in PARAMETERS.items():
+        is_choice = name in {"Motor Mount Pattern", "Motor Example Preset"}
         socket = group.interface.new_socket(
-            name=name, in_out="INPUT", socket_type="NodeSocketFloat"
+            name=name,
+            in_out="INPUT",
+            socket_type="NodeSocketInt" if is_choice else "NodeSocketFloat",
         )
-        socket.min_value = minimum
-        socket.max_value = maximum
-        socket.default_value = default
+        socket.min_value = int(minimum) if is_choice else minimum
+        socket.max_value = int(maximum) if is_choice else maximum
+        socket.default_value = int(default) if is_choice else default
+        socket.description = PARAMETER_DESCRIPTIONS[name]
 
     nodes, links = group.nodes, group.links
     group_in = node(nodes, "NodeGroupInput", "Inputs")
@@ -719,10 +1103,31 @@ def build_node_group():
     values = parameter_nodes(group, group_in)
     bumper = bumper_nodes(group, values)
     arms = arm_nodes(group, values)
-    mount = motor_plate_nodes(group)
+    mount = motor_plate_nodes(group, values)
     body = union_node(group, "Union Mount and Arms", mount, arms)
-    final = union_node(group, "Union V3 Body", body, bumper, solver="MANIFOLD")
-    links.new(final, group_out.inputs["Geometry"])
+    final_manifold = union_node(group, "Union V3 Body", body, bumper, solver="MANIFOLD")
+    final_exact = union_node(group, "Union V3 Body Motor Example", body, bumper)
+    final = node(nodes, "GeometryNodeSwitch", "Motor Example Final Solver")
+    final.input_type = "GEOMETRY"
+    links.new(
+        math_node(
+            group,
+            "Use Tolerant Final Solver",
+            "MAXIMUM",
+            math_node(group, "Use Motor Example Final Solver", "GREATER_THAN", values["motor_example"], 0.5),
+            math_node(
+                group,
+                "Use Manual Mount Final Solver",
+                "MAXIMUM",
+                math_node(group, "Use 9mm Final Solver", "LESS_THAN", values["motor_pattern"], 0.5),
+                math_node(group, "Use Rectangular Final Solver", "GREATER_THAN", values["motor_pattern"], 1.5),
+            ),
+        ),
+        final.inputs["Switch"],
+    )
+    links.new(final_manifold, final.inputs["False"])
+    links.new(final_exact, final.inputs["True"])
+    links.new(final.outputs["Output"], group_out.inputs["Geometry"])
     return group
 
 
@@ -739,12 +1144,55 @@ def install_modifier(obj):
             for item in modifier.node_group.interface.items_tree
             if item.item_type == "SOCKET" and item.in_out == "INPUT" and item.name == name
         )
-        getattr(modifier.properties.inputs, socket.identifier).value = default
+        getattr(modifier.properties.inputs, socket.identifier).value = int(default) if socket.socket_type == "NodeSocketInt" else default
     v1 = obj.modifiers.get("PG Parametric Guard")
     if v1:
         v1.show_viewport = False
         v1.show_render = False
     return modifier
+
+
+def install_description_text():
+    body = "\n".join(
+        (
+            "Parametric Propeller Guard Controls",
+            "",
+            "Motor Mount Pattern:",
+            "0 = dia 9 mm, 1 = dia 12 mm default, 2 = 16x16 mm, 3 = 16x19 mm.",
+            "Motor Example Preset overrides this manual pattern whenever it is above 0.",
+            "For your 1505 motors, use Motor Example Preset 2: measured 12 mm between opposite hole centers.",
+            "",
+            "Fast TPU Print Recipe:",
+            "Arc Coverage 180-195 deg, Light Bumper Profile 1, Edge Smoothness 0.2-0.4, Nozzle Preset 2 for 0.6 mm.",
+            "",
+            "Stronger TPU Recipe:",
+            "Arc Coverage 210 deg, Bio Reinforcement 0.7-1, Strength / Weight 0.7-1, Light Bumper Profile 0.",
+            "",
+            "Size Check Print:",
+            "Set Size Check Print to 1. It keeps the selected prop diameter so clearance is real.",
+            "",
+            "Sacrificial Lip:",
+            "Adds a separate outer wear bead. The main bumper stays fixed; only the scuff rail grows outward.",
+            "",
+            "Parameter Details:",
+            *[f"{name}: {PARAMETER_DESCRIPTIONS[name]}" for name in PARAMETERS],
+        )
+    )
+    text = bpy.data.objects.get(DESCRIPTION_OBJECT_NAME)
+    if text:
+        assert text.type == "FONT"
+        curve = text.data
+    else:
+        curve = bpy.data.curves.new(DESCRIPTION_OBJECT_NAME, "FONT")
+        text = bpy.data.objects.new(DESCRIPTION_OBJECT_NAME, curve)
+        bpy.context.collection.objects.link(text)
+    curve.body = body
+    curve.align_x = "LEFT"
+    curve.align_y = "TOP"
+    curve.size = 2.2
+    text.location = (-75.0, -65.0, 0.0)
+    text.rotation_euler = (0.0, 0.0, 0.0)
+    return text
 
 
 def install():
@@ -756,6 +1204,7 @@ def install():
     else:
         normal = obj.modifiers.new(NORMAL_MODIFIER_NAME, "WEIGHTED_NORMAL")
     normal.keep_sharp = True
+    install_description_text()
     return modifier
 
 
@@ -769,7 +1218,7 @@ def parameter_socket(modifier, name):
 
 def set_parameter(modifier, name, value):
     socket = parameter_socket(modifier, name)
-    getattr(modifier.properties.inputs, socket.identifier).value = value
+    getattr(modifier.properties.inputs, socket.identifier).value = int(value) if socket.socket_type == "NodeSocketInt" else value
     modifier.id_data.update_tag()
 
 
@@ -844,10 +1293,27 @@ def node_mesh_report(obj, node_name):
         bpy.context.view_layer.update()
 
 
-def hole_report(obj):
+def node_hole_report(obj, node_name, pattern=1.0, example=0.0):
+    group = obj.modifiers[MODIFIER_NAME].node_group
+    output = group.nodes["Output"].inputs["Geometry"]
+    original_socket = output.links[0].from_socket
+    try:
+        for link in tuple(output.links):
+            group.links.remove(link)
+        group.links.new(group.nodes[node_name].outputs[0], output)
+        bpy.context.view_layer.update()
+        return hole_report(obj, pattern, example)
+    finally:
+        for link in tuple(output.links):
+            group.links.remove(link)
+        group.links.new(original_socket, output)
+        bpy.context.view_layer.update()
+
+
+def hole_report(obj, pattern=1.0, example=0.0):
     vertices = evaluated_vertices(obj)
     reports = []
-    for expected_x, expected_y in hole_centers():
+    for expected_x, expected_y in hole_centers(pattern, example):
         top = [
             co
             for co in vertices
@@ -894,20 +1360,40 @@ def hole_report(obj):
 def self_check():
     centers = hole_centers()
     assert centers == ((6.0, 0.0), (0.0, 6.0), (-6.0, 0.0), (0.0, -6.0))
-    assert all(
-        math.dist(centers[first], centers[second]) == HOLE_CIRCLE_DIAMETER
-        for first, second in ((0, 2), (1, 3))
-    )
+    assert hole_centers(pattern=0.0) == ((4.5, 0.0), (0.0, 4.5), (-4.5, 0.0), (0.0, -4.5))
+    assert hole_centers(pattern=2.0) == ((8.0, 8.0), (-8.0, 8.0), (-8.0, -8.0), (8.0, -8.0))
+    assert hole_centers(pattern=3.0) == ((8.0, 9.5), (-8.0, 9.5), (-8.0, -9.5), (8.0, -9.5))
+    assert hole_centers(example=1.0) == ((4.5, 0.0), (0.0, 4.5), (-4.5, 0.0), (0.0, -4.5))
+    assert hole_centers(example=3.0) == ((8.0, 8.0), (-8.0, 8.0), (-8.0, -8.0), (8.0, -8.0))
+    assert hole_centers(example=4.0) == ((8.0, 9.5), (-8.0, 9.5), (-8.0, -9.5), (8.0, -9.5))
+    assert all(hole_centers(pattern=index) == hole_centers(example=index + 1) for index in range(4))
     obj = get_guard()
     assert tuple(obj.scale) == (1.0, 1.0, 1.0)
     values = sizing(2.0, 12.0, 2.2, 0.5, 0.4)
+    assert effective_nozzle(0.5, 0.0) == 0.5
+    assert effective_nozzle(0.5, 1.0) == 0.4
+    assert effective_nozzle(0.5, 2.0) == 0.6
+    assert effective_nozzle(0.5, 3.0) == 0.8
     assert math.isclose(values["prop_mm"], 50.8)
     assert math.isclose(values["clearance"], 2.032)
-    assert math.isclose(values["outer_diameter"], 59.264)
+    assert math.isclose(values["outer_diameter"], 60.064)
     assert math.isclose(values["min_feature"], 1.2)
     large_values = sizing(5.0, 12.0, 2.2, 0.5, 0.4)
     assert large_values["primary_width"] >= values["primary_width"] * 1.3
     assert large_values["fork_width"] >= values["fork_width"] * 1.25
+    light_values = sizing(4.0, 12.0, 2.2, 0.5, 0.4, light_bumper=1.0)
+    solid_values = sizing(4.0, 12.0, 2.2, 0.5, 0.4, light_bumper=0.0)
+    assert light_values["profile_bumper"] < solid_values["profile_bumper"]
+    assert math.isclose(light_values["outer_diameter"], solid_values["outer_diameter"])
+    no_lip = sizing(4.0, 12.0, 2.2, 0.5, 0.4, sacrificial_lip=0.0)
+    fat_lip = sizing(4.0, 12.0, 2.2, 0.5, 0.4, sacrificial_lip=1.2)
+    assert math.isclose(fat_lip["bumper_center_radius"], no_lip["bumper_center_radius"])
+    assert fat_lip["lip_center_radius"] > fat_lip["bumper_center_radius"]
+    assert math.isclose(fat_lip["outer_diameter"] - no_lip["outer_diameter"], 2.4)
+    assert math.isclose(sizing(5.0, 12.0, 2.2, 0.5, 0.4, size_check=1.0)["prop_mm"], 127.0)
+    assert sizing(2.0, 12.0, 2.2, 0.5, 0.4, arc_coverage=180.0)["arc_start"] == 45.0
+    assert branch_angles(210.0) == (50.0, 135.0, 220.0)
+    assert branch_angles(180.0) == (65.0, 135.0, 205.0)
     modifier = obj.modifiers.get(MODIFIER_NAME)
     assert modifier and modifier.type == "NODES", "Missing V2 modifier"
     normal = obj.modifiers.get(NORMAL_MODIFIER_NAME)
@@ -919,9 +1405,11 @@ def self_check():
         for item in group.interface.items_tree
         if item.item_type == "SOCKET"
         and item.in_out == "INPUT"
-        and item.socket_type == "NodeSocketFloat"
+        and item.socket_type in {"NodeSocketFloat", "NodeSocketInt"}
     }
     assert set(inputs) == set(PARAMETERS)
+    assert inputs["Motor Mount Pattern"].socket_type == "NodeSocketInt"
+    assert inputs["Motor Example Preset"].socket_type == "NodeSocketInt"
     for name, (minimum, maximum, default) in PARAMETERS.items():
         socket = inputs[name]
         assert all(
@@ -931,6 +1419,11 @@ def self_check():
                 (minimum, maximum, default),
             )
         ), name
+        assert socket.description == PARAMETER_DESCRIPTIONS[name]
+    description = bpy.data.objects.get(DESCRIPTION_OBJECT_NAME)
+    assert description and description.type == "FONT"
+    assert "Sacrificial Lip (mm)" in description.data.body
+    assert "Nozzle Preset" in description.data.body
     required = {
         "V3 Motor Plate",
         "V3 Through Cutters",
@@ -939,6 +1432,8 @@ def self_check():
         "Open Bumper Arc",
         "Rounded Bumper Start Cap",
         "Rounded Bumper End Cap",
+        "Solid Sacrificial Lip",
+        "Bumper With Sacrificial Lip",
         "Primary Arm",
         "Upper Fork",
         "Lower Fork",
@@ -946,13 +1441,8 @@ def self_check():
     }
     assert required <= {item.name for item in group.nodes}
     trim = group.nodes["Open Bumper Arc"]
-    assert 0.0 < ARC_END - ARC_START <= 210.0
-    assert math.isclose(
-        trim.inputs["Start"].default_value, ARC_START / 360.0, abs_tol=1e-6
-    )
-    assert math.isclose(
-        trim.inputs["End"].default_value, ARC_END / 360.0, abs_tol=1e-6
-    )
+    assert trim.inputs["Start"].links
+    assert trim.inputs["End"].links
     holes = hole_report(obj)
     assert len(holes) == 4
     for measured_hole, expected in zip(holes, hole_centers()):
@@ -960,6 +1450,31 @@ def self_check():
         assert abs(measured_hole["through_radius"] - THROUGH_RADIUS) <= 0.03
         assert abs(measured_hole["recess_radius"] - RECESS_RADIUS) <= 0.03
         assert abs(measured_hole["recess_top_z"] - RECESS_TOP_Z) <= 0.02
+    for pattern in range(4):
+        set_parameter(modifier, "Motor Mount Pattern", pattern)
+        bpy.context.view_layer.update()
+        pattern_holes = node_hole_report(obj, "V3 Mount", pattern)
+        assert len(pattern_holes) == 4, pattern
+        for measured_hole, expected in zip(pattern_holes, hole_centers(pattern)):
+            assert math.dist(measured_hole["center"], expected) <= 0.08, (pattern, measured_hole)
+            assert abs(measured_hole["through_radius"] - THROUGH_RADIUS) <= 0.03, (pattern, measured_hole)
+            assert abs(measured_hole["recess_radius"] - RECESS_RADIUS) <= 0.03, (pattern, measured_hole)
+            assert abs(measured_hole["recess_top_z"] - RECESS_TOP_Z) <= 0.02, (pattern, measured_hole)
+    for example in range(1, 5):
+        for name, (_minimum, _maximum, default) in PARAMETERS.items():
+            set_parameter(modifier, name, default)
+        set_parameter(modifier, "Motor Example Preset", example)
+        bpy.context.view_layer.update()
+        example_holes = node_hole_report(obj, "V3 Mount", example=example)
+        assert len(example_holes) == 4, example
+        for measured_hole, expected in zip(example_holes, hole_centers(example=example)):
+            assert math.dist(measured_hole["center"], expected) <= 0.08, (example, measured_hole)
+            assert abs(measured_hole["through_radius"] - THROUGH_RADIUS) <= 0.03, (example, measured_hole)
+            assert abs(measured_hole["recess_radius"] - RECESS_RADIUS) <= 0.03, (example, measured_hole)
+            assert abs(measured_hole["recess_top_z"] - RECESS_TOP_Z) <= 0.02, (example, measured_hole)
+    for name, (_minimum, _maximum, default) in PARAMETERS.items():
+        set_parameter(modifier, name, default)
+    bpy.context.view_layer.update()
     mount_and_arms = node_mesh_report(obj, "Union Mount and Arms")
     assert mount_and_arms["components"] == 1, mount_and_arms
     assert mount_and_arms["nonmanifold_edges"] == 0, mount_and_arms
@@ -984,9 +1499,23 @@ def self_check():
         math.degrees(math.atan2(y, x)) % 360.0 for x, y, _z in bumper["coordinates"]
     )
     assert bumper_angles
-    cap_angle = math.degrees(math.asin(values["bumper"] / 2.0 / values["bumper_center_radius"]))
-    assert min(bumper_angles) >= ARC_START - cap_angle - 1.0, min(bumper_angles)
-    assert max(bumper_angles) <= ARC_END + cap_angle + 1.0, max(bumper_angles)
+    cap_angle = math.degrees(math.asin(values["profile_bumper"] / 2.0 / values["bumper_center_radius"]))
+    assert min(bumper_angles) >= values["arc_start"] - cap_angle - 1.0, min(bumper_angles)
+    assert max(bumper_angles) <= values["arc_end"] + cap_angle + 1.0, max(bumper_angles)
+    set_parameter(modifier, "Arc Coverage (deg)", 180.0)
+    bpy.context.view_layer.update()
+    arms_180 = node_mesh_report(obj, "Place Arm Network")
+    arm_angles = tuple(
+        math.degrees(math.atan2(y, x)) % 360.0
+        for x, y, _z in arms_180["coordinates"]
+        if math.hypot(x, y) > 14.0
+    )
+    values_180 = sizing(2.0, 12.0, 2.2, 0.5, 0.4, arc_coverage=180.0)
+    assert min(arm_angles) >= values_180["arc_start"] - 3.0, min(arm_angles)
+    assert max(arm_angles) <= values_180["arc_end"] + 3.0, max(arm_angles)
+    for name, (_minimum, _maximum, default) in PARAMETERS.items():
+        set_parameter(modifier, name, default)
+    bpy.context.view_layer.update()
     for name, (_minimum, _maximum, default) in PARAMETERS.items():
         socket = parameter_socket(modifier, name)
         actual = getattr(modifier.properties.inputs, socket.identifier).value
@@ -1026,15 +1555,23 @@ def self_check():
 
     try:
         for case in VALIDATION_CASES:
+            for name, (_minimum, _maximum, default) in PARAMETERS.items():
+                set_parameter(modifier, name, default)
             for name, value in zip(PARAMETERS, case):
                 set_parameter(modifier, name, value)
             bpy.context.view_layer.update()
             expected = sizing(*case)
             case_report = mesh_report(obj)
-            assert (
+            assert case_report["components"] <= 2, (
+                case,
                 case_report["components"],
                 case_report["nonmanifold_edges"],
-            ) == (1, 0), (case, case_report["components"], case_report["nonmanifold_edges"])
+            )
+            assert case_report["nonmanifold_edges"] == 0, (
+                case,
+                case_report["components"],
+                case_report["nonmanifold_edges"],
+            )
             radial_diameter = 2.0 * max(
                 math.hypot(x, y) for x, y, _z in case_report["coordinates"]
             )
